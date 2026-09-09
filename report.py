@@ -26,7 +26,10 @@ def fig_para_base64(fig) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def gerar_grafico_curva_drawdown(equity, drawdown) -> str:
+def montar_figura_curva_drawdown(equity, drawdown, rotulo_valor="R$/contrato"):
+    """Constrói a figura (não fecha, não codifica) -- reaproveitada tanto
+    pelo relatório HTML estático (via gerar_grafico_curva_drawdown) quanto
+    pela página Streamlit ao vivo (via st.pyplot)."""
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(10, 5.5), sharex=True, height_ratios=[2.2, 1],
         gridspec_kw={"hspace": 0.08},
@@ -34,20 +37,24 @@ def gerar_grafico_curva_drawdown(equity, drawdown) -> str:
 
     ax1.plot(equity.index, equity.values, color="#1f6feb", linewidth=1.3)
     ax1.fill_between(equity.index, equity.values, 0, color="#1f6feb", alpha=0.07)
-    ax1.set_ylabel("Equity (R$/contrato)")
+    ax1.set_ylabel(f"Equity ({rotulo_valor})")
     ax1.grid(alpha=0.25)
-    ax1.set_title("Curva de capital e drawdown — R$ por contrato", fontsize=12, loc="left")
+    ax1.set_title(f"Curva de capital e drawdown — {rotulo_valor}", fontsize=12, loc="left")
 
     ax2.fill_between(drawdown.index, drawdown.values, 0, color="#d1242f", alpha=0.35)
     ax2.plot(drawdown.index, drawdown.values, color="#d1242f", linewidth=0.8)
-    ax2.set_ylabel("Drawdown (R$)")
+    ax2.set_ylabel(f"Drawdown ({rotulo_valor})")
     ax2.grid(alpha=0.25)
 
     ax2.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
     ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b/%y"))
     fig.autofmt_xdate()
 
-    return fig_para_base64(fig)
+    return fig
+
+
+def gerar_grafico_curva_drawdown(equity, drawdown) -> str:
+    return fig_para_base64(montar_figura_curva_drawdown(equity, drawdown))
 
 
 def fmt(v, casas=2, pct=False, moeda=False):
@@ -114,7 +121,9 @@ def gerar_secao_pagina2(p2: dict) -> str:
     """
 
 
-def gerar_grafico_distribuicao(p3: dict) -> str:
+def montar_figura_distribuicao(p3: dict):
+    """Constrói a figura (não fecha, não codifica) -- reaproveitada tanto
+    pelo relatório HTML estático quanto pela página Streamlit ao vivo."""
     serie = p3["serie"]
     fig, (ax1, ax2) = plt.subplots(
         1, 2, figsize=(10, 3.6), gridspec_kw={"width_ratios": [2.3, 1]},
@@ -135,7 +144,11 @@ def gerar_grafico_distribuicao(p3: dict) -> str:
     ax2.grid(alpha=0.2)
 
     fig.tight_layout()
-    return fig_para_base64(fig)
+    return fig
+
+
+def gerar_grafico_distribuicao(p3: dict) -> str:
+    return fig_para_base64(montar_figura_distribuicao(p3))
 
 
 def gerar_secao_pagina3(p3: dict) -> str:
