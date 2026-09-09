@@ -29,3 +29,14 @@ def agregar_diario(
     diario["liquido"] = diario["bruto"] - diario["custo"]
     diario["liquido_por_contrato"] = diario["liquido"] / contratos_referencia
     return diario
+
+
+def escalar_por_contratos(valores, n_contratos: float):
+    """Escala um valor absoluto (ou série) já normalizado por-contrato
+    para um número hipotético de contratos `n_contratos`. Escala linear
+    direta (AGENTS.md §9) -- só use em valores/séries em R$ absolutos;
+    métricas percentuais e razões (Sharpe, Calmar, Profit Factor, etc.)
+    são invariantes ao número de contratos e não devem passar por aqui."""
+    if n_contratos < 0:
+        raise ValueError("n_contratos não pode ser negativo")
+    return valores * n_contratos

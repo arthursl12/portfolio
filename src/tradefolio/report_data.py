@@ -13,6 +13,35 @@ from tradefolio.trades import reconstruir_trades
 
 PERCENTIS_PAGINA3 = (1, 5, 10, 25, 50, 75, 90, 95, 99)
 
+JANELAS_DISPONIVEIS = (
+    "1 semana", "1 mês", "3 meses", "6 meses", "1 ano", "2 anos", "desde o início",
+)
+
+_OFFSET_POR_JANELA = {
+    "1 semana": pd.DateOffset(weeks=1),
+    "1 mês": pd.DateOffset(months=1),
+    "3 meses": pd.DateOffset(months=3),
+    "6 meses": pd.DateOffset(months=6),
+    "1 ano": pd.DateOffset(years=1),
+    "2 anos": pd.DateOffset(years=2),
+}
+
+
+def filtrar_por_janela(diario: pd.DataFrame, janela: str) -> pd.DataFrame:
+    """Recorta `diario` para os últimos `janela` a partir da ÚLTIMA data
+    presente nos dados (não da data de hoje -- o histórico pode terminar
+    no passado). "desde o início" retorna os dados sem filtrar. Um
+    rótulo desconhecido levanta erro em vez de silenciosamente não
+    filtrar."""
+    if janela == "desde o início":
+        return diario
+    if janela not in _OFFSET_POR_JANELA:
+        raise ValueError(
+            f"janela desconhecida: {janela!r} -- use uma de {JANELAS_DISPONIVEIS}"
+        )
+    inicio = diario.index.max() - _OFFSET_POR_JANELA[janela]
+    return diario.loc[inicio:]
+
 
 def montar_dataframe_diario(csv_path) -> pd.DataFrame:
     ordens = carregar_ordens(csv_path)
