@@ -1,0 +1,11 @@
+#;Data/Hora;Ativo;C/V;Quantidade;Preço limite;Status;Tipo;Quantidade executada;Preço médio;Resultado (Abs.);Resultado %;Resultado (R$)
+1;02/01/2025 / 09:00:00;WINF25;C;2;140000;executada;entrada;2;140000;-;-;-
+2;02/01/2025 / 09:05:00;WINF25;V;2;140100;executada;saída;2;140100;200,00;0,07;200,00
+3;03/01/2025 / 09:00:00;WINF25;C;2;140000;executada;entrada;2;140000;-;-;-
+4;03/01/2025 / 09:05:00;WINF25;V;2;140050;executada;saída;2;140050;100,00;0,04;100,00
+5;03/01/2025 / 10:00:00;WINF25;V;2;140200;executada;entrada;2;140200;-;-;-
+6;03/01/2025 / 10:05:00;WINF25;C;2;140275;executada;saída;2;140275;-150,00;-0,05;-150,00
+7;06/01/2025 / 09:00:00;WINF25;C;2;140000;executada;entrada;2;140000;-;-;-
+8;06/01/2025 / 09:05:00;WINF25;V;2;139850;executada;saída;2;139850;-300,00;-0,11;-300,00
+9;08/01/2025 / 09:00:00;WINF25;C;2;140000;executada;entrada;2;140000;-;-;-
+10;08/01/2025 / 09:05:00;WINF25;V;2;140000;executada;saída;2;140000;0,00;0,00;0,00
