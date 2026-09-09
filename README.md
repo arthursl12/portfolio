@@ -55,6 +55,24 @@ sem precisar de dados próprios:
 Isso escreve `lamina_exemplo.html` na raiz do projeto (veja `demo.py` para o
 código) — abra no navegador.
 
+## Página ao vivo (Streamlit)
+
+`app.py` é uma versão interativa: envie um CSV ou escolha um robô de
+`dados_exemplo/`, filtre por janela de tempo (1 semana até 2 anos, ou desde o
+início — cada janela é recalculada do zero, não é um recorte da curva
+acumulada) e simule quantos contratos você operaria (as métricas em R$ e o
+gráfico escalam linearmente; retorno %, drawdown %, Sharpe/Sortino/Calmar
+não mudam com o número de contratos — são invariantes por construção).
+
+```bash
+.venv/bin/streamlit run app.py
+```
+
+Abre em `http://localhost:8501`. Só mostra métricas de nível diário (página 1
+e a distribuição da página 3) — nesta primeira versão, deliberadamente sem a
+página de trades (página 2), porque filtrar as ordens pela mesma janela
+poderia cortar um trade no meio e corromper a reconstrução de posição.
+
 ## Rodando os testes
 
 ```bash
@@ -70,6 +88,10 @@ código) — abra no navegador.
   por `tradefolio.report_data`.
 - `demo.py` — roda `report.py` sobre `tests/fixtures/romanos_orders.csv`,
   sem precisar de dados próprios.
+- `app.py` — página Streamlit ao vivo (upload/exemplo, filtro de janela,
+  simulação de contratos). Ver "Página ao vivo" acima.
+- `dados_exemplo/` — CSVs de exemplo para a página Streamlit (separado de
+  `tests/fixtures/`, que é para os testes).
 - `sheet.py` — implementação original de referência (pré-`tradefolio/`);
   não é mais o caminho usado por `report.py`.
 - `tests/` — suíte pytest, incluindo `tests/fixtures/` (dados de exemplo e
