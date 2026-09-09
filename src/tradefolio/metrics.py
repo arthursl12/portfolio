@@ -116,11 +116,19 @@ def maior_sequencia(serie: pd.Series, positivo: bool) -> int:
     return int(tamanhos.max()) if len(tamanhos) else 0
 
 
-def maior_sequencia_detalhada(serie: pd.Series, positivo: bool) -> dict:
+def maior_sequencia_detalhada(
+    serie: pd.Series,
+    positivo: bool,
+    datas_inicio: pd.Series = None,
+    datas_fim: pd.Series = None,
+) -> dict:
     """Como maior_sequencia, mas retorna também o valor total somado na
-    corrida recorde e o início/fim (do índice de `serie`) dessa corrida.
-    Quando não há nenhuma ocorrência, retorna início/fim None em vez de
-    inventar uma data/posição."""
+    corrida recorde e o início/fim dessa corrida. Por padrão usa o próprio
+    índice de `serie` para início/fim; passe `datas_inicio`/`datas_fim`
+    (indexadas como `serie`) quando cada elemento tiver seu próprio
+    início/fim distintos -- caso de trades, onde um trade pode abrir e
+    fechar em instantes diferentes. Quando não há nenhuma ocorrência,
+    retorna início/fim None em vez de inventar uma data/posição."""
     alvo = serie > 0 if positivo else serie < 0
     grupos = (alvo != alvo.shift()).cumsum()
 
@@ -133,11 +141,17 @@ def maior_sequencia_detalhada(serie: pd.Series, positivo: bool) -> dict:
     mascara_recorde = grupos == grupo_recorde
     indices_recorde = serie.index[mascara_recorde]
 
+    if datas_inicio is not None:
+        inicio = datas_inicio.loc[indices_recorde[0]]
+        fim = datas_fim.loc[indices_recorde[-1]]
+    else:
+        inicio, fim = indices_recorde[0], indices_recorde[-1]
+
     return {
         "comprimento": int(tamanhos.max()),
         "valor_total": serie.loc[mascara_recorde].sum(),
-        "inicio": indices_recorde[0],
-        "fim": indices_recorde[-1],
+        "inicio": inicio,
+        "fim": fim,
     }
 
 

@@ -93,3 +93,50 @@ def test_maior_sequencia_detalhada_sem_ocorrencia():
 
 def test_maior_sequencia_sem_ocorrencia_e_zero():
     assert maior_sequencia(pd.Series([-1.0, -2.0, -3.0]), positivo=True) == 0
+
+
+# ---------------------------------------------------------------------------
+# datas_inicio/datas_fim separados: necessario para trades, onde inicio e fim
+# de UM trade podem ser instantes diferentes (nao apenas o indice da serie).
+# Timestamps conferidos por script contra tests/fixtures/mini_fixture_orders.csv
+# reconstruido (ver historico da sessao).
+# ---------------------------------------------------------------------------
+
+TRADES_INICIO = pd.Series(
+    pd.to_datetime([
+        "2025-01-02 09:00:00", "2025-01-03 09:00:00", "2025-01-03 10:00:00",
+        "2025-01-06 09:00:00", "2025-01-08 09:00:00",
+    ]),
+    index=[1, 2, 3, 4, 5],
+)
+TRADES_FIM = pd.Series(
+    pd.to_datetime([
+        "2025-01-02 09:05:00", "2025-01-03 09:05:00", "2025-01-03 10:05:00",
+        "2025-01-06 09:05:00", "2025-01-08 09:05:00",
+    ]),
+    index=[1, 2, 3, 4, 5],
+)
+
+
+def test_maior_sequencia_detalhada_com_datas_inicio_fim_separadas_positiva():
+    resultado = maior_sequencia_detalhada(
+        SERIE_TRADES, positivo=True, datas_inicio=TRADES_INICIO, datas_fim=TRADES_FIM
+    )
+    assert resultado == {
+        "comprimento": 2,
+        "valor_total": 298.00,
+        "inicio": pd.Timestamp("2025-01-02 09:00:00"),
+        "fim": pd.Timestamp("2025-01-03 09:05:00"),
+    }
+
+
+def test_maior_sequencia_detalhada_com_datas_inicio_fim_separadas_negativa():
+    resultado = maior_sequencia_detalhada(
+        SERIE_TRADES, positivo=False, datas_inicio=TRADES_INICIO, datas_fim=TRADES_FIM
+    )
+    assert resultado == {
+        "comprimento": 3,
+        "valor_total": -453.00,
+        "inicio": pd.Timestamp("2025-01-03 10:00:00"),
+        "fim": pd.Timestamp("2025-01-08 09:05:00"),
+    }
