@@ -161,6 +161,14 @@ figures. This is not a real account balance, just the denominator used for
   `patrimonio`, not the fixed initial capital — this is what reproduces the
   platform's reported drawdown % exactly. Confirmed: our max drawdown % of
   35.36% matches the Smarttbot report exactly using this method.
+- **Basis consistency matters more than which basis you pick**, since drawdown %/Ulcer % are
+  scale-invariant ratios: `1,000 × contratos` applied to the *total* accumulated result and a fixed
+  `1,000` applied to the *per-contract* accumulated result give identical %s (verified algebraically
+  and by cross-checking `tradefolio.drawdowns` against `tests/fixtures/romanos_orders.csv` — both
+  reproduce 35.36% exactly). `tradefolio.drawdowns` works entirely on the per-contract basis (matching
+  `liquido_por_contrato` elsewhere in the codebase), so it uses the fixed `R$1,000` form — mixing a
+  total-account capital with a per-contract equity series (or vice versa) breaks the ratio and was the
+  one wrong intermediate result hit while building it.
 - Sharpe and Sortino are scale-invariant (mean/std ratio), so they come out
   identical whether computed on raw R$ or on %-of-capital daily results —
   no special handling needed there.
