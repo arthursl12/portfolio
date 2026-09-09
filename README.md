@@ -49,35 +49,11 @@ O repositório já traz um CSV real (robô "Romanos") em
 sem precisar de dados próprios:
 
 ```bash
-.venv/bin/python -c "
-import report
-diario = report.montar_dataframe_diario('tests/fixtures/romanos_orders.csv')
-metricas, equity, drawdown = report.calcular_metricas_pagina1(diario)
-grafico_b64 = report.gerar_grafico_curva_drawdown(equity, drawdown)
-
-ordens = report.carregar_ordens('tests/fixtures/romanos_orders.csv')
-p2 = report.calcular_metricas_pagina2(diario, ordens)
-metricas.update({
-    'n_trades_reconstruidos': p2['n_trades'],
-    'win_rate_trades': p2['win_rate_trades'],
-    'profit_factor_trades': p2['profit_factor_trades'],
-    'lucro_medio_trade': p2['lucro_medio_trade'],
-    'prejuizo_medio_trade': p2['prejuizo_medio_trade'],
-})
-secao_pagina2 = report.gerar_secao_pagina2(p2)
-
-p3 = report.calcular_metricas_pagina3(diario)
-grafico_dist_b64 = report.gerar_grafico_distribuicao(p3)
-secao_pagina3 = report.gerar_secao_pagina3(p3)
-
-html = report.gerar_html(metricas, grafico_b64, grafico_dist_b64, secao_pagina2, secao_pagina3)
-with open('lamina_exemplo.html', 'w', encoding='utf-8') as f:
-    f.write(html)
-print('Salvo em: lamina_exemplo.html')
-"
+.venv/bin/python demo.py
 ```
 
-Isso escreve `lamina_exemplo.html` na raiz do projeto — abra no navegador.
+Isso escreve `lamina_exemplo.html` na raiz do projeto (veja `demo.py` para o
+código) — abra no navegador.
 
 ## Rodando os testes
 
@@ -92,6 +68,8 @@ Isso escreve `lamina_exemplo.html` na raiz do projeto — abra no navegador.
   Ver `CLAUDE.md` para a arquitetura completa e as convenções de domínio.
 - `report.py` — renderização do HTML/gráficos a partir dos dicts produzidos
   por `tradefolio.report_data`.
+- `demo.py` — roda `report.py` sobre `tests/fixtures/romanos_orders.csv`,
+  sem precisar de dados próprios.
 - `sheet.py` — implementação original de referência (pré-`tradefolio/`);
   não é mais o caminho usado por `report.py`.
 - `tests/` — suíte pytest, incluindo `tests/fixtures/` (dados de exemplo e
