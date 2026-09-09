@@ -6,7 +6,7 @@ import pandas as pd
 
 from tradefolio import drawdowns, metrics
 from tradefolio.alignment import preencher_calendario_b3
-from tradefolio.daily import CONTRATOS_REFERENCIA_PADRAO, agregar_diario
+from tradefolio.daily import CONTRATOS_REFERENCIA_PADRAO, agregar_diario, detectar_contratos_referencia
 from tradefolio.drawdowns import CAPITAL_POR_CONTRATO_PADRAO
 from tradefolio.loaders import carregar_ordens
 from tradefolio.trades import reconstruir_trades
@@ -43,13 +43,22 @@ def filtrar_por_janela(diario: pd.DataFrame, janela: str) -> pd.DataFrame:
     return diario.loc[inicio:]
 
 
-def montar_dataframe_diario(csv_path) -> pd.DataFrame:
+def montar_dataframe_diario(csv_path, contratos_referencia: int = None) -> pd.DataFrame:
+    """`contratos_referencia=None` (padrão) detecta automaticamente a
+    partir do próprio CSV (tradefolio.daily.detectar_contratos_referencia)
+    -- AGENTS.md §9: cada robô tem seu próprio tamanho de posição, não
+    pode ser assumido igual a outro. Passe um valor explícito só se
+    precisar sobrepor a detecção."""
     ordens = carregar_ordens(csv_path)
-    diario = agregar_diario(ordens)
+    if contratos_referencia is None:
+        contratos_referencia = detectar_contratos_referencia(ordens)
+    diario = agregar_diario(ordens, contratos_referencia=contratos_referencia)
     return preencher_calendario_b3(diario)
 
 
-def calcular_pagina1(diario: pd.DataFrame) -> tuple[dict, pd.Series, pd.Series]:
+def calcular_pagina1(
+    diario: pd.DataFrame, contratos_referencia: int = CONTRATOS_REFERENCIA_PADRAO
+) -> tuple[dict, pd.Series, pd.Series]:
     serie = diario["liquido_por_contrato"]
 
     equity = drawdowns.curva_equity(serie)
@@ -76,7 +85,7 @@ def calcular_pagina1(diario: pd.DataFrame) -> tuple[dict, pd.Series, pd.Series]:
         "melhor_dia": serie.max(),
         "max_drawdown": max_dd,
         "max_drawdown_pct": drawdowns.maximo_drawdown_pct(dd_pct),
-        "retorno_bruto_pct": (diario["bruto"].sum() / CONTRATOS_REFERENCIA_PADRAO)
+        "retorno_bruto_pct": (diario["bruto"].sum() / contratos_referencia)
         / CAPITAL_POR_CONTRATO_PADRAO
         * 100,
         "retorno_liquido_pct": serie.sum() / CAPITAL_POR_CONTRATO_PADRAO * 100,
