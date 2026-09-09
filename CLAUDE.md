@@ -127,6 +127,18 @@ See `tests/fixtures/romanos_expected.md` for the full reconciliation.
   rows as trades** — reconstruct trades from net position (see below).
 - `Ativo` changes over time due to futures contract roll (e.g. `WINV25` →
   `WINZ25`) — treat this as a continuous series, not a break.
+- **A `saída` row can legitimately carry no `Resultado (R$)`.** Found in
+  `tests/fixtures/romanos_orders.csv` (26 rows, all at exactly 17:39:00 — a
+  consistent end-of-day time): the platform's forced end-of-day square-off
+  can log a same-instant re-entry tagged `saída` instead of `entrada`, which
+  isn't closing anything so has nothing to compute a result from. Confirmed
+  by tracing net position through one such timestamp by hand.
+  `tradefolio.trades.reconstruir_trades` already handles this correctly
+  regardless of the `Tipo` label (trade boundaries come from net position
+  crossing zero, and a leg with no result simply contributes 0 to
+  `resultado_bruto`) — `tradefolio.validation` treats this as a warning, not
+  an error (AGENTS.md §14: explicit warning for uncertain-but-processable
+  data). Don't tighten this back into a hard validation error.
 
 ### Trade reconstruction
 

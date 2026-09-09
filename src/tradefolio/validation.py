@@ -5,6 +5,8 @@ silent repair. Covers the risks sheet.py's original parsing didn't check:
 an unknown 'C/V' or 'Tipo' value would have been silently treated as
 whichever branch an if/else happened to fall into.
 """
+import warnings
+
 import pandas as pd
 
 COLUNAS_OBRIGATORIAS = ("Data/Hora", "C/V", "Tipo", "Quantidade executada", "Resultado (R$)")
@@ -43,7 +45,19 @@ def validar_ordens_parseadas(df: pd.DataFrame) -> None:
 
     saidas_sem_resultado = df[(df["Tipo"] == "saída") & df["Resultado (R$)"].isna()]
     if len(saidas_sem_resultado):
-        raise ValueError(f"{len(saidas_sem_resultado)} linha(s) de 'saída' sem 'Resultado (R$)'")
+        # Não é necessariamente um erro: observado em dados reais (Smarttbot,
+        # robô Romanos) que o fechamento forçado de fim de pregão pode gerar
+        # uma linha "saída" que na verdade reabre posição no mesmo instante
+        # (sempre às 17:39:00 nessa amostra) e por isso não carrega
+        # resultado. tradefolio.trades.reconstruir_trades já trata isso
+        # corretamente (rastreia posição líquida, ignora resultado ausente),
+        # então isso é aviso, não erro (AGENTS.md §14: aviso explícito para
+        # dado incerto porém processável).
+        warnings.warn(
+            f"{len(saidas_sem_resultado)} linha(s) de 'saída' sem 'Resultado (R$)' "
+            "(comum em fechamentos forçados de fim de pregão) -- processando mesmo assim",
+            stacklevel=2,
+        )
 
     if "#" in df.columns and df["#"].duplicated().any():
         duplicados = sorted(df.loc[df["#"].duplicated(keep=False), "#"].unique())

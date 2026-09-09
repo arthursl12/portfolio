@@ -66,10 +66,13 @@ def test_carregar_ordens_propaga_erro_de_valor_categorico_invalido(tmp_path):
         carregar_ordens(caminho)
 
 
-def test_carregar_ordens_propaga_erro_de_saida_sem_resultado(tmp_path):
+def test_carregar_ordens_avisa_mas_carrega_saida_sem_resultado(tmp_path):
+    # Padrao real da plataforma (fechamento forcado de fim de pregao), nao
+    # dado corrompido -- ver tests/test_validation.py e CLAUDE.md.
     caminho = _escrever_csv(
         tmp_path,
         ['1;02/01/2025 / 09:05:00;WINF25;V;2;140100;executada;saída;2;140100;-;-;-'],
     )
-    with pytest.raises(ValueError, match="saída"):
-        carregar_ordens(caminho)
+    with pytest.warns(UserWarning, match="saída"):
+        ordens = carregar_ordens(caminho)
+    assert len(ordens) == 1

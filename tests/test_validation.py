@@ -97,11 +97,16 @@ def test_validar_ordens_parseadas_rejeita_quantidade_nao_positiva():
         validar_ordens_parseadas(df)
 
 
-def test_validar_ordens_parseadas_rejeita_saida_sem_resultado():
+def test_validar_ordens_parseadas_avisa_mas_nao_rejeita_saida_sem_resultado():
+    # Descoberto ao rodar contra tests/fixtures/romanos_orders.csv: 26
+    # linhas "saida" reais (fechamento forcado de fim de pregao, sempre
+    # 17:39:00) nao tem Resultado (R$) -- e um padrao real da plataforma,
+    # nao dado corrompido, e tradefolio.trades.reconstruir_trades ja lida
+    # com isso corretamente. Deve avisar, nao levantar (AGENTS.md §14).
     df = _parseadas(_ordens_validas())
     df.loc[1, "Resultado (R$)"] = math.nan  # linha 1 e "saida"
-    with pytest.raises(ValueError, match="saída"):
-        validar_ordens_parseadas(df)
+    with pytest.warns(UserWarning, match="saída"):
+        validar_ordens_parseadas(df)  # nao deve levantar
 
 
 def test_validar_ordens_parseadas_rejeita_id_duplicado():
