@@ -16,7 +16,7 @@ import streamlit as st
 
 from report import fmt, montar_figura_curva_drawdown, montar_figura_distribuicao
 from tradefolio.alignment import preencher_calendario_b3
-from tradefolio.daily import CONTRATOS_REFERENCIA_PADRAO, agregar_diario, escalar_por_contratos
+from tradefolio.daily import agregar_diario, detectar_contratos_referencia, escalar_por_contratos
 from tradefolio.loaders import carregar_ordens
 from tradefolio.report_data import JANELAS_DISPONIVEIS, calcular_pagina1, calcular_pagina3, filtrar_por_janela
 
@@ -59,13 +59,6 @@ with st.sidebar:
         else:
             st.warning(f"Nenhum CSV de exemplo em {DADOS_EXEMPLO_DIR}/")
 
-    st.header("Filtros")
-    janela = st.selectbox("Janela", JANELAS_DISPONIVEIS, index=len(JANELAS_DISPONIVEIS) - 1)
-    n_contratos = st.number_input(
-        "Número de contratos", min_value=1, max_value=100,
-        value=CONTRATOS_REFERENCIA_PADRAO, step=1,
-    )
-
 if arquivo_ordens is None:
     st.info("Envie um CSV ou escolha um robô de exemplo para ver a lâmina.")
     st.stop()
@@ -76,10 +69,28 @@ except ValueError as erro:
     st.error(f"CSV inválido: {erro}")
     st.stop()
 
-diario = preencher_calendario_b3(agregar_diario(ordens))
+try:
+    contratos_referencia = detectar_contratos_referencia(ordens)
+except ValueError as erro:
+    # ex.: um robô com tamanho de posição dinâmico (sem valor dominante de
+    # 'Quantidade executada') -- não é seguro assumir uma referência.
+    st.error(f"Não foi possível determinar o número de contratos de referência: {erro}")
+    st.stop()
+
+with st.sidebar:
+    st.header("Filtros")
+    janela = st.selectbox("Janela", JANELAS_DISPONIVEIS, index=len(JANELAS_DISPONIVEIS) - 1)
+    chave_arquivo = getattr(arquivo_ordens, "name", str(arquivo_ordens))
+    n_contratos = st.number_input(
+        "Número de contratos", min_value=1, max_value=200,
+        value=contratos_referencia, step=1,
+        key=f"n_contratos::{chave_arquivo}",
+    )
+
+diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
 diario_filtrado = filtrar_por_janela(diario, janela)
 
-metricas, equity, drawdown = calcular_pagina1(diario_filtrado)
+metricas, equity, drawdown = calcular_pagina1(diario_filtrado, contratos_referencia=contratos_referencia)
 metricas = escalar_metricas_absolutas(metricas, n_contratos)
 equity = escalar_por_contratos(equity, n_contratos)
 drawdown = escalar_por_contratos(drawdown, n_contratos)
@@ -90,7 +101,7 @@ p_ini, p_fim = metricas["periodo"]
 st.caption(
     f"Período: {p_ini.strftime('%d/%m/%Y')} a {p_fim.strftime('%d/%m/%Y')} "
     f"({metricas['pregoes']} pregões) · simulação a {n_contratos} contrato(s) "
-    f"(referência do backtest: {CONTRATOS_REFERENCIA_PADRAO})"
+    f"(referência detectada no CSV: {contratos_referencia})"
 )
 
 col1, col2, col3, col4 = st.columns(4)

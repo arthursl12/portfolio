@@ -8,6 +8,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
+from tradefolio.alignment import preencher_calendario_b3
+from tradefolio.daily import agregar_diario, detectar_contratos_referencia
 from tradefolio.report_data import (
     montar_dataframe_diario,
     calcular_pagina1 as calcular_metricas_pagina1,
@@ -274,11 +276,13 @@ def gerar_html(metricas: dict, grafico_b64: str, grafico_dist_b64: str = "", sec
 
 
 if __name__ == "__main__":
-    diario = montar_dataframe_diario(CSV_PATH)
-    metricas, equity, drawdown = calcular_metricas_pagina1(diario)
+    ordens = carregar_ordens(CSV_PATH)
+    contratos_referencia = detectar_contratos_referencia(ordens)
+    diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+
+    metricas, equity, drawdown = calcular_metricas_pagina1(diario, contratos_referencia=contratos_referencia)
     grafico_b64 = gerar_grafico_curva_drawdown(equity, drawdown)
 
-    ordens = carregar_ordens(CSV_PATH)
     p2 = calcular_metricas_pagina2(diario, ordens)
     metricas["n_trades_reconstruidos"] = p2["n_trades"]
     metricas["win_rate_trades"] = p2["win_rate_trades"]
