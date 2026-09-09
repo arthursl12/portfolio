@@ -8,11 +8,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-from lamina_fase1 import (
-    montar_dataframe_diario, calcular_metricas_pagina1,
-    calcular_metricas_pagina2, calcular_metricas_pagina3,
-    carregar_ordens, CSV_PATH,
+from tradefolio.report_data import (
+    montar_dataframe_diario,
+    calcular_pagina1 as calcular_metricas_pagina1,
+    calcular_pagina2 as calcular_metricas_pagina2,
+    calcular_pagina3 as calcular_metricas_pagina3,
 )
+from tradefolio.loaders import carregar_ordens
+
+CSV_PATH = "/mnt/user-data/uploads/orders_romanos.csv"
 
 
 def fig_para_base64(fig) -> str:
@@ -257,7 +261,7 @@ def gerar_html(metricas: dict, grafico_b64: str, grafico_dist_b64: str = "", sec
 
 
 if __name__ == "__main__":
-    diario = montar_dataframe_diario()
+    diario = montar_dataframe_diario(CSV_PATH)
     metricas, equity, drawdown = calcular_metricas_pagina1(diario)
     grafico_b64 = gerar_grafico_curva_drawdown(equity, drawdown)
 
