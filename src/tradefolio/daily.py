@@ -11,6 +11,8 @@ from tradefolio.costs import CUSTO_POR_PERNA_PADRAO, custo_b3
 
 CONTRATOS_REFERENCIA_PADRAO = 2
 
+FRACAO_MINIMA_DOMINANTE = 0.9
+
 
 def agregar_diario(
     ordens: pd.DataFrame,
@@ -29,6 +31,33 @@ def agregar_diario(
     diario["liquido"] = diario["bruto"] - diario["custo"]
     diario["liquido_por_contrato"] = diario["liquido"] / contratos_referencia
     return diario
+
+
+def detectar_contratos_referencia(ordens: pd.DataFrame) -> int:
+    """Infere o número de contratos de referência do backtest a partir do
+    valor mais frequente de 'Quantidade executada'.
+
+    AGENTS.md §9: cada robô tem seu próprio tamanho de posição -- não
+    pode ser assumido (CONTRATOS_REFERENCIA_PADRAO é o default de
+    agregar_diario/calcular_pagina1 apenas por retrocompatibilidade;
+    quem orquestra o carregamento deve chamar esta função em vez de
+    confiar no default). Tolera uma minoria de linhas com quantidade
+    diferente (fills parciais -- o próprio romanos_orders.csv já
+    validado tem 4 linhas com 1 contrato em 1645, ~99.76% dominante) via
+    FRACAO_MINIMA_DOMINANTE; abaixo desse limiar não é seguro inferir
+    uma única referência (ex.: um robô com tamanho de posição dinâmico)
+    e a ambiguidade é levantada em vez de adivinhada.
+    """
+    contagem = ordens["Quantidade executada"].value_counts()
+    valor_dominante = contagem.idxmax()
+    fracao_dominante = contagem.max() / contagem.sum()
+    if fracao_dominante < FRACAO_MINIMA_DOMINANTE:
+        raise ValueError(
+            "não foi possível inferir um único número de contratos de referência "
+            f"(nenhum valor atinge {FRACAO_MINIMA_DOMINANTE:.0%} das linhas) -- "
+            f"distribuição de 'Quantidade executada': {contagem.to_dict()}"
+        )
+    return int(valor_dominante)
 
 
 def escalar_por_contratos(valores, n_contratos: float):
