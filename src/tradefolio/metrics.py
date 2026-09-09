@@ -8,6 +8,8 @@ import math
 
 import pandas as pd
 
+DIAS_UTEIS_ANO_PADRAO = 252
+
 
 def payoff(serie: pd.Series) -> float:
     """AGENTS.md §8.3: avg gain / abs(avg loss).
@@ -137,3 +139,43 @@ def maior_sequencia_detalhada(serie: pd.Series, positivo: bool) -> dict:
         "inicio": indices_recorde[0],
         "fim": indices_recorde[-1],
     }
+
+
+def sharpe(serie: pd.Series, periodos_por_ano: int = DIAS_UTEIS_ANO_PADRAO) -> float:
+    desvio = serie.std()
+    if not desvio or pd.isna(desvio):
+        return math.nan
+    return serie.mean() / desvio * math.sqrt(periodos_por_ano)
+
+
+def sortino(serie: pd.Series, periodos_por_ano: int = DIAS_UTEIS_ANO_PADRAO) -> float:
+    perdas = serie[serie < 0]
+    desvio_perdas = perdas.std() if len(perdas) > 1 else math.nan
+    if not desvio_perdas or pd.isna(desvio_perdas):
+        return math.nan
+    return serie.mean() / desvio_perdas * math.sqrt(periodos_por_ano)
+
+
+def retorno_anualizado(serie: pd.Series) -> float:
+    """Retorno total / anos corridos (dias corridos entre a primeira e a
+    última data do índice, / 365.25)."""
+    n_anos = (serie.index.max() - serie.index.min()).days / 365.25
+    if n_anos <= 0:
+        return math.nan
+    return serie.sum() / n_anos
+
+
+def calmar(serie: pd.Series, max_drawdown_valor: float) -> float:
+    """Retorno anualizado / |Maximum Drawdown|. Recebe o Maximum Drawdown
+    já calculado (tradefolio.drawdowns.maximo_drawdown) em vez de
+    recalculá-lo, para não acoplar este módulo a drawdowns.py."""
+    if not max_drawdown_valor:
+        return math.nan
+    return retorno_anualizado(serie) / abs(max_drawdown_valor)
+
+
+def recovery_factor(serie: pd.Series, max_drawdown_valor: float) -> float:
+    """Retorno total / |Maximum Drawdown|."""
+    if not max_drawdown_valor:
+        return math.nan
+    return serie.sum() / abs(max_drawdown_valor)
