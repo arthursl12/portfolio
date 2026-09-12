@@ -171,8 +171,13 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
 ### Tarefa 3.4 — Consolidar resultados mensais
 - [x] P&L, custo, líquido, dias operados, trades, melhor/pior dia, mês
   completo/parcial — `monthly.agregar_mensal`
-- [ ] Distância para o limiar, vapo elegível — bloqueados por Épico 6 (limiar)
-  e Épico 7 (vapo), documentado como exclusão deliberada em `monthly.py`
+- [ ] Distância para o limiar — não implementada como função própria (seria
+  só `limiar - retorno`, trivial dado o que a tarefa 4.2 já expõe), mas
+  não colocada em `monthly.py` pelo mesmo motivo arquitetural de 4.2: exige
+  um `limiar` real (que depende de `StrategyConfiguration.minimum_margin`,
+  fora do pipeline funcional por decisão do Épico 2)
+- [ ] Vapo elegível — ainda bloqueado, Épico 7 (vapo) não existe;
+  documentado como exclusão deliberada em `monthly.py`
 
 ---
 
@@ -205,8 +210,31 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
   um NO_TRADE excluído do denominador)
 
 ### Tarefa 4.2 — RLT (retorno sobre o limiar)
-- [ ] Acumulado/mensal/anualizado/móvel 3-6-12m — bloqueado por Épico 6
-  (não existe "limiar" ainda para servir de denominador)
+- [x] `limiar.rlt_acumulado`/`rlt_mensal`/`rlt_anualizado`/`rlt_movel(...,
+  janela_meses)` — funções puras que recebem um `limiar` (float) já
+  calculado, não recalculado por janela. Decisão de escala confirmada com
+  o usuário (nova pergunta feita após decompor_limiar já existir):
+  `minimum_margin` é da POSIÇÃO TOTAL, não por contrato — então RLT usa
+  `diario['liquido']` (total), não `liquido_por_contrato`, e o
+  `drawdown_serie` passado a `decompor_limiar` também deve ser o da série
+  total ao calcular o limiar real de um robô. Verificado contra
+  `orders_roboraiz.csv`: limiar=13.495,00 (minimum_margin=10.000, P95
+  sobre drawdown total), RLT acumulado=1,3303
+- [ ] Não ligado a `calcular_pagina1/2/3` automaticamente — decisão
+  arquitetural deliberada: calcular um `limiar` real exige
+  `StrategyConfiguration.minimum_margin` (Épico 2), e a decisão do Épico 2
+  foi manter `domain.py` aditivo, sem realimentar o pipeline funcional
+  (`daily.py`/`report_data.py` continuam exatamente como estavam). Quem
+  tiver as duas peças (uma `StrategyConfiguration` e a saída de
+  `calcular_pagina1/3`) compõe as funções de `limiar.py` externamente
+
+### Tarefa 4.4 — Normalizar risco pelo limiar
+- [x] `limiar.normalizar_por_limiar(valor, limiar)` — mesma função
+  genérica que `rlt_acumulado` usa por baixo (AGENTS.md §8.1), aplicada a
+  MDD, Pior dia, ES95, Ulcer, Pior mês em vez de retorno. Mesma decisão de
+  não-wiring automático que 4.2 (mesmo motivo). Verificado contra
+  `orders_roboraiz.csv`: MDD/L=-24,84%, Pior dia/L=-5,91%, ES95/L=-3,93%,
+  Ulcer/L=8,13%, Pior mês/L=-10,74%
 
 ### Tarefa 4.3 — Métricas de risco
 - [x] MDD, pior dia, VaR histórico, ES, Ulcer Index, TUW, maior sequência
@@ -225,9 +253,6 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
   (mediana de `duracao_total_pregoes` só entre episódios recuperados;
   verificado contra Romanos: 32 episódios, 31 recuperados, mediana 4
   pregões), a partir dos dados já existentes em `drawdowns.calcular_episodios_drawdown`
-
-### Tarefa 4.4 — Normalizar risco pelo limiar
-- [ ] MDD/L, Pior dia/L, ES95/L, Ulcer/L, Pior mês/L — bloqueado por Épico 6
 
 ### Tarefa 4.5 — Métricas de qualidade
 - [x] Profit Factor, Sharpe, Sortino, Calmar, Recovery Factor, ganho médio,
