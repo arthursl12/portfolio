@@ -24,7 +24,7 @@ escrever este teste (ver histórico da sessão).
 """
 import pandas as pd
 
-from tradefolio.metrics import maior_sequencia, maior_sequencia_detalhada
+from tradefolio.metrics import maior_sequencia, maior_sequencia_detalhada, maior_sequencia_mascara
 
 SERIE_DIARIA = pd.Series(
     [99.50, -26.00, -150.50, 0.00, -0.50],
@@ -140,3 +140,23 @@ def test_maior_sequencia_detalhada_com_datas_inicio_fim_separadas_negativa():
         "inicio": pd.Timestamp("2025-01-03 10:00:00"),
         "fim": pd.Timestamp("2025-01-08 09:05:00"),
     }
+
+
+def test_maior_sequencia_mascara_generaliza_qualquer_predicado():
+    # AGENTS.md épico 7.4: "meses consecutivos sem vapo" precisa de uma
+    # condição de igualdade (== 0), que maior_sequencia (só > 0 / < 0)
+    # não cobre -- maior_sequencia_mascara aceita a máscara já pronta.
+    serie = pd.Series([0.0, 0.0, 5.0, 0.0, 0.0, 0.0, -3.0])
+    assert maior_sequencia_mascara(serie == 0) == 3
+
+
+def test_maior_sequencia_mascara_sem_ocorrencia_e_zero():
+    assert maior_sequencia_mascara(pd.Series([1.0, 2.0]) == 0) == 0
+
+
+def test_maior_sequencia_usa_mascara_por_baixo():
+    # maior_sequencia(serie, positivo) deve continuar dando o mesmo
+    # resultado de antes -- é um refactor (extrair maior_sequencia_mascara),
+    # não uma mudança de comportamento.
+    assert maior_sequencia(SERIE_DIARIA, positivo=True) == 1
+    assert maior_sequencia(SERIE_DIARIA, positivo=False) == 2

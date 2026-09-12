@@ -106,14 +106,23 @@ def kurtosis_excedente(serie: pd.Series) -> float:
     return serie.kurt()
 
 
+def maior_sequencia_mascara(mascara: pd.Series) -> int:
+    """Comprimento da maior corrida consecutiva de True numa máscara
+    booleana já pronta -- genérica (AGENTS.md §8.1): serve tanto para
+    `serie > 0`/`serie < 0` (maior_sequencia) quanto para outros
+    predicados (ex. `vapo_liquido == 0`, "meses consecutivos sem vapo",
+    AGENTS.md épico 7.4), sem precisar de uma função nova por predicado."""
+    grupos = (mascara != mascara.shift()).cumsum()
+    tamanhos = mascara.groupby(grupos).sum()
+    return int(tamanhos.max()) if len(tamanhos) else 0
+
+
 def maior_sequencia(serie: pd.Series, positivo: bool) -> int:
     """Comprimento da maior corrida de valores estritamente positivos
     (ou negativos, se positivo=False) consecutivos. Um valor exatamente
     zero quebra a sequência em ambos os sentidos."""
     alvo = serie > 0 if positivo else serie < 0
-    grupos = (alvo != alvo.shift()).cumsum()
-    tamanhos = alvo.groupby(grupos).sum()
-    return int(tamanhos.max()) if len(tamanhos) else 0
+    return maior_sequencia_mascara(alvo)
 
 
 def maior_sequencia_detalhada(
