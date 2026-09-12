@@ -55,6 +55,7 @@ def test_pagina1_metricas_principais(diario):
     assert metricas["loss_medio"] == pytest.approx(-59.00)
     assert metricas["payoff"] == pytest.approx(1.686441, rel=1e-6)
     assert metricas["expectancia_diaria"] == pytest.approx(-15.50)
+    assert metricas["media_diaria_dias_operados"] == pytest.approx(-19.375)
     assert metricas["profit_factor_diario"] == pytest.approx(0.562147, rel=1e-6)
     assert metricas["pior_dia"] == pytest.approx(-150.50)
     assert metricas["melhor_dia"] == pytest.approx(99.50)

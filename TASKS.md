@@ -55,8 +55,10 @@ existing implementation or the natural place to add new code.
   `ordens` mas excluídas de `agregar_diario`, `reconstruir_trades` (corrigido
   um bug real: uma ordem cancelada com posição já em 0 criava um trade
   fantasma de duração zero) e `detectar_contratos_referencia`
-- [ ] "Identificar linhas com P&L" como checagem própria (hoje implícito em
-  `Tipo == "saída"`, não uma validação/contagem explícita)
+- [x] "Identificar linhas com P&L" como checagem própria — já coberto por
+  `diagnostico_ingestao`'s `linhas_com_resultado`
+  (`Resultado (R$).notna()`, não apenas `Tipo == "saída"`); item marcado
+  como pendente por engano numa rodada anterior desta mesma tarefa
 
 ### Tarefa 1.2 — Perfis de importação
 - [ ] Interface comum `OrderImporter` (`can_parse`/`parse`/`diagnostics`) —
@@ -189,9 +191,16 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
   `report_data`/registro de métricas
 - [ ] Lucro **por ativo** — dado-base pronto desde 3.1
   (`daily.agregar_diario_por_ativo`), falta expor como métrica nomeada em
-  `calcular_pagina1/2/3` (ex. `agregar_diario_por_ativo(...).groupby("ativo_raiz")["liquido"].sum()`)
-- [ ] Lucro **por dia operado** (excluindo dias sem trade do denominador —
-  hoje `media_diaria` divide pelo total de pregões, não só pelos operados)
+  `calcular_pagina1/2/3` (ex. `agregar_diario_por_ativo(...).groupby("ativo_raiz")["liquido"].sum()`).
+  Não feito nesta rodada porque exigiria mudar a assinatura de
+  `calcular_pagina1` (hoje só recebe `diario`, não `ordens`) — afeta
+  `app.py` e vários testes; consumidor natural é o Épico 12 da lâmina
+  ideal, deixado para lá em vez de forçar agora
+- [x] Lucro **por dia operado** — `report_data.calcular_pagina1`'s
+  `media_diaria_dias_operados` (`serie[diario["operou"]].mean()`), com
+  entrada no `metric_registry`. Verificado contra o mini-fixture: média
+  geral -15,50 (5 pregões) vs. média só dos operados -19,375 (4 pregões,
+  um NO_TRADE excluído do denominador)
 
 ### Tarefa 4.2 — RLT (retorno sobre o limiar)
 - [ ] Acumulado/mensal/anualizado/móvel 3-6-12m — bloqueado por Épico 6

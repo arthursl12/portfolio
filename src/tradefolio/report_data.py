@@ -72,6 +72,7 @@ def calcular_pagina1(
         "lucro_liquido_2c": diario["liquido"].sum(),
         "lucro_liquido_por_contrato": serie.sum(),
         "media_diaria": serie.mean(),
+        "media_diaria_dias_operados": serie[diario["operou"]].mean(),
         "mediana_diaria": serie.median(),
         "pct_dias_positivos": metrics.taxa_positivos(serie),
         "pct_dias_negativos": metrics.taxa_negativos(serie),
