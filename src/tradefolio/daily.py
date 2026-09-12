@@ -12,6 +12,7 @@ even though its Quantidade executada == 0 already keeps it from moving
 bruto/custo.
 """
 import pandas as pd
+import pandas_market_calendars as mcal
 
 from tradefolio.costs import CUSTO_POR_PERNA_PADRAO, custo_b3
 from tradefolio.validation import STATUS_EXECUTADA, extrair_raiz_ativo
@@ -70,6 +71,27 @@ def agregar_diario_por_ativo(
     diario = pd.concat([bruto, custo, quantidade, n_trades], axis=1).fillna(0)
     diario["liquido"] = diario["bruto"] - diario["custo"]
     return diario
+
+
+def pivotar_liquido_por_ativo(ordens: pd.DataFrame) -> pd.DataFrame:
+    """Reshape largo de agregar_diario_por_ativo['liquido'] (colunas =
+    ativo_raiz), reindexado no mesmo calendário B3 completo que a
+    agregação principal usaria (range de datas das ordens executadas) --
+    base para MDD/correlação por ativo (AGENTS.md épico 3.1/12). Uma
+    sessão sem NENHUMA ordem some no reindex (0); um (data, ativo) sem
+    ordem DENTRO do range (ex. um ativo que só passou a operar depois do
+    início do histórico) vira 0 via fillna -- mesma convenção NO_TRADE=0
+    já usada em tradefolio.alignment, não deixado como NaN."""
+    executadas = ordens[ordens["Status"] == STATUS_EXECUTADA]
+    largo = agregar_diario_por_ativo(ordens)["liquido"].unstack("ativo_raiz")
+
+    calendario = mcal.get_calendar("B3")
+    pregoes = calendario.schedule(
+        start_date=executadas["data"].min(), end_date=executadas["data"].max()
+    ).index
+    largo = largo.reindex(pregoes, fill_value=0.0).fillna(0.0)
+    largo.index.name = "data"
+    return largo
 
 
 def detectar_contratos_referencia(ordens: pd.DataFrame) -> int:
