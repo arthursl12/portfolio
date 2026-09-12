@@ -24,8 +24,10 @@ import pytest
 from tradefolio.daily import detectar_contratos_referencia
 
 
-def _ordens_com_quantidades(quantidades: list[int]) -> pd.DataFrame:
-    return pd.DataFrame({"Quantidade executada": quantidades})
+def _ordens_com_quantidades(quantidades: list[int], status: list[str] = None) -> pd.DataFrame:
+    if status is None:
+        status = ["executada"] * len(quantidades)
+    return pd.DataFrame({"Quantidade executada": quantidades, "Status": status})
 
 
 def test_detecta_quantidade_constante():
@@ -50,3 +52,14 @@ def test_mensagem_de_erro_mostra_a_distribuicao():
     quantidades = [3] * 43 + [1] * 40 + [2] * 17
     with pytest.raises(ValueError, match=r"3.*43|43.*3"):
         detectar_contratos_referencia(_ordens_com_quantidades(quantidades))
+
+
+def test_ignora_ordens_nao_executadas_na_deteccao():
+    # dados_exemplo/orders_roboraiz.csv: 213 canceladas + 1 expirada, todas
+    # com Quantidade executada == 0 -- essas linhas nao devem contar como
+    # "mais um valor de quantidade" na distribuicao, ou uma referencia por
+    # outro lado limpa (ex.: 96% em 2) poderia ficar abaixo do limiar so por
+    # causa de ordens que nunca foram executadas.
+    quantidades = [2] * 96 + [1] * 4 + [0] * 30
+    status = ["executada"] * 100 + ["cancelada"] * 30
+    assert detectar_contratos_referencia(_ordens_com_quantidades(quantidades, status)) == 2

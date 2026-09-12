@@ -4,10 +4,18 @@ Convention (CLAUDE.md > "Trade reconstruction", AGENTS.md §9): a trade is
 the span from when net position leaves zero to when it returns to zero, not
 a single order row or a single "saída" row — a "saída" can be split across
 multiple partial fills, so counting raw rows overstates trade count.
+
+Non-executed orders (Status != "executada") are skipped entirely (AGENTS.md
+épico 1, tarefa 1.1): a cancelled/expired row has Quantidade executada == 0
+and doesn't move the position, but if it arrives while position is already
+0 it would otherwise open AND immediately close a phantom zero-length
+trade in the same iteration (position stays 0 before and after a 0-qty
+row) -- skipping it avoids fabricating a trade that never happened.
 """
 import pandas as pd
 
 from tradefolio.costs import CUSTO_POR_PERNA_PADRAO, custo_b3
+from tradefolio.validation import STATUS_EXECUTADA
 
 
 def reconstruir_trades(ordens: pd.DataFrame, custo_por_perna: float = CUSTO_POR_PERNA_PADRAO) -> pd.DataFrame:
@@ -16,6 +24,8 @@ def reconstruir_trades(ordens: pd.DataFrame, custo_por_perna: float = CUSTO_POR_
     atual = None
 
     for _, ordem in ordens.iterrows():
+        if ordem["Status"] != STATUS_EXECUTADA:
+            continue
         qtd = ordem["Quantidade executada"]
         sinal = 1 if ordem["C/V"] == "C" else -1
         if posicao == 0:
