@@ -180,9 +180,13 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
 - [x] Lucro bruto/líquido, retorno acumulado, retorno anualizado, média/
   mediana diária, % dias positivos — `report_data.calcular_pagina1`,
   `metrics.retorno_anualizado`
-- [ ] Média/mediana **mensal** (existe por mês em `monthly.py`, falta agregar
-  a série mensal em si — `monthly_liquido.mean()`/`.median()`)
-- [ ] % de **meses positivos** (mesma ideia, sobre a série de `monthly.py`)
+- [x] Média/mediana **mensal** e % de **meses positivos** — não precisaram
+  de função nova: `monthly.agregar_mensal` ganhou a coluna
+  `liquido_por_contrato` (soma mensal, mesma base de `melhor_dia`/`pior_dia`)
+  e as funções genéricas de `metrics.py` (`.mean()`/`.median()`/
+  `taxa_positivos`) já funcionam sobre ela (AGENTS.md §8.1) — verificado
+  contra `tests/fixtures/romanos_orders.csv` (16 meses). Ainda não ligado a
+  `report_data`/registro de métricas
 - [ ] Lucro **por ativo** — dado-base pronto desde 3.1
   (`daily.agregar_diario_por_ativo`), falta expor como métrica nomeada em
   `calcular_pagina1/2/3` (ex. `agregar_diario_por_ativo(...).groupby("ativo_raiz")["liquido"].sum()`)
@@ -196,18 +200,20 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
 ### Tarefa 4.3 — Métricas de risco
 - [x] MDD, pior dia, VaR histórico, ES, Ulcer Index, TUW, maior sequência
   negativa — `drawdowns.py`, `metrics.py`
-- [ ] **Drawdown corrente** (último valor da série de drawdown, distinto do
-  MDD histórico) — não exposto como métrica nomeada hoje
+- [x] **Drawdown corrente** — `drawdowns.drawdown_corrente` (último valor da
+  série, distinto do MDD histórico — confirmado com valores diferentes
+  contra dados reais: -48,5 vs. -1.441,50 de MDD em Romanos)
 - [ ] **Pior semana móvel** — granularidade semanal não existe (só diária/
   mensal)
-- [ ] **Pior mês** — trivial a partir de `monthly.py` (`liquido.min()`), mas
-  ainda não é uma métrica nomeada em `calcular_pagina1/2/3`
-- [ ] **Desvio padrão** e **downside deviation** como métricas nomeadas e
-  testadas isoladamente (hoje usadas inline dentro de `sharpe`/`sortino`,
-  não expostas)
-- [ ] **Tempo de recuperação** como métrica de topo — os dados já existem em
-  `drawdowns.calcular_episodios_drawdown` (`duracao_total_pregoes`), falta
-  agregar/expor um número único (ex. mediana entre episódios recuperados)
+- [x] **Pior mês** — mesma solução de 4.1: `monthly.agregar_mensal()["liquido_por_contrato"].min()`,
+  nenhuma função nova precisou ser escrita
+- [x] **Desvio padrão** e **downside deviation** como métricas nomeadas —
+  `metrics.desvio_padrao`/`metrics.downside_deviation`; `sortino` refatorado
+  para reusar `downside_deviation` em vez de duplicar o cálculo
+- [x] **Tempo de recuperação** — `drawdowns.tempo_recuperacao_mediano`
+  (mediana de `duracao_total_pregoes` só entre episódios recuperados;
+  verificado contra Romanos: 32 episódios, 31 recuperados, mediana 4
+  pregões), a partir dos dados já existentes em `drawdowns.calcular_episodios_drawdown`
 
 ### Tarefa 4.4 — Normalizar risco pelo limiar
 - [ ] MDD/L, Pior dia/L, ES95/L, Ulcer/L, Pior mês/L — bloqueado por Épico 6
@@ -215,42 +221,53 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
 ### Tarefa 4.5 — Métricas de qualidade
 - [x] Profit Factor, Sharpe, Sortino, Calmar, Recovery Factor, ganho médio,
   perda média, payoff, taxa de acerto — `metrics.py`
-- [ ] "Expectativa por operação" como métrica de página 2 nomeada (hoje
-  calculável via `metrics.expectancia(trades["resultado_liquido"])` mas não
-  incluída no dict de `calcular_pagina2`)
+- [x] "Expectativa por operação" — `expectancia_por_trade` em
+  `calcular_pagina2` (`metrics.expectancia(trades["resultado_liquido"])`),
+  com entrada no `metric_registry` — totalmente ligado, não só a função
 
 ---
 
 ## Épico 5 — Qualidade da curva
 
-Nenhuma tarefa implementada — módulo novo, sugestão: `src/tradefolio/concentracao.py`.
+Implementado em `src/tradefolio/concentracao.py`. Nenhuma função nova
+precisou tocar `report_data.py` (ainda não ligado lá — só as funções de
+cálculo existem e estão testadas, mesmo padrão de 3.1/4.1).
 
 ### Tarefa 5.1 — Concentração positiva
-- [ ] Participação do melhor dia, 5 melhores dias, 10 melhores dias, melhor
-  mês, 3 melhores meses, últimos 60 dias (todos como % do lucro total)
+- [x] `participacao_top_n(serie, n)` — genérica (AGENTS.md §8.1), serve para
+  dias e meses. Deliberadamente NÃO limitada a [0,1]: >100% é sinal real de
+  concentração patológica, não erro a esconder (a própria "lâmina ideal.pdf"
+  §9 usa isso como exemplo de alerta). Verificado contra Romanos.
 
 ### Tarefa 5.2 — Resultado removendo eventos
-- [ ] Lucro sem melhor dia / sem 5 melhores dias / sem melhor mês / sem 3
-  melhores meses / sem últimos 60 dias
+- [x] `resultado_sem_top_n(serie, n)` (genérica, dia ou mês) e
+  `resultado_antes_dos_ultimos_n_dias(serie, n)` (posicional, só dia —
+  "últimos N dias" é cronológico, não por ranking de valor)
 
 ### Tarefa 5.3 — Detectar "curva salva recentemente"
-- [ ] Regras determinísticas: `NEGATIVE_BEFORE_LAST_60_DAYS`,
-  `PROFIT_SAVED_BY_BEST_MONTH`, `TOP3_EXCEEDS_TOTAL_PROFIT` — depende de
-  5.1/5.2 primeiro (precisa dos números de concentração para avaliar os
-  limiares das regras)
+- [x] `detectar_alertas_curva` — as 3 regras determinísticas do PDF
+  (`NEGATIVE_BEFORE_LAST_60_DAYS`, `PROFIT_SAVED_BY_BEST_MONTH`,
+  `TOP3_EXCEEDS_TOTAL_PROFIT`), schema de dict compatível com o épico 17
+  (warning_code/severity/metric/observed_value/threshold/message).
+  Confirmado que Romanos (robô real, saudável) não dispara nenhum alerta —
+  guarda contra falso-positivo
 
 ### Tarefa 5.4 — Permanência abaixo do zero
-- [ ] % de dias com equity acumulada negativa, primeira passagem para
-  positivo, última passagem por negativo, dias desde a consolidação
-  positiva — dados-base (`equity`) já existem em `drawdowns.curva_equity`,
-  falta a função de agregação específica
+- [x] `pct_dias_abaixo_de_zero`, `primeira_data_positiva`,
+  `ultima_data_negativa`, `pregoes_desde_consolidacao_positiva` —
+  verificado contra Romanos (4 de 312 dias negativos, consolidado há 300
+  pregões) e um caso onde a amostra termina ainda negativa (retorna 0, não
+  inventa uma consolidação que não aconteceu)
 
 ### Tarefa 5.5 — Dividir em subperíodos
-- [ ] Blocos de tamanho semelhante conforme duração do histórico (3 blocos
-  p/ 6-12m, 4 trimestres p/12m, semestres, anos-calendário) mostrando lucro/
-  MDD/PF/meses positivos/RLT/estabilidade por bloco — RLT bloqueado por
-  Épico 6, o resto é composição do que já existe em `report_data.py`
-  aplicado a cada bloco
+- [x] `escolher_numero_de_blocos` (3 blocos 6-12m, 4 blocos 12-24m, semestres
+  além disso) + `dividir_em_subperiodos` + `metricas_por_subperiodo`
+  (lucro/MDD/PF/% dias positivos por bloco). Blocos por CONTAGEM DE
+  PREGÕES, não mês-calendário. Três coisas do épico deliberadamente não
+  implementadas (documentadas no código, não inventadas): alinhamento a
+  "anos-calendário" (exigiria decidir o tratamento de ano parcial nas
+  bordas), RLT por bloco (bloqueado pelo Épico 6), e "estabilidade" (termo
+  nunca definido no PDF-fonte)
 
 ---
 
