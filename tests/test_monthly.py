@@ -75,6 +75,20 @@ def test_agregar_mensal_melhor_e_pior_dia_usam_liquido_por_contrato():
     assert fev["pior_dia"] == 0.0  # pregões sem ordem entram zerados
 
 
+def test_agregar_mensal_soma_liquido_por_contrato():
+    # AGENTS.md épico 4.1 ("média/mediana mensal", "pior mês") precisa de
+    # uma base mensal por-contrato, consistente com melhor_dia/pior_dia
+    # (que já usam liquido_por_contrato) -- não a coluna "liquido", que
+    # está no nível de referência do backtest, não por 1 contrato.
+    mensal = agregar_mensal(_diario_jan_parcial_fev_completo())
+
+    jan = mensal.loc["2025-01"]
+    assert jan["liquido_por_contrato"] == pytest.approx(58.5)  # 49.5 - 15.5 + 24.5
+
+    fev = mensal.loc["2025-02"]
+    assert fev["liquido_por_contrato"] == pytest.approx(99.5)
+
+
 def test_agregar_mensal_marca_mes_parcial_na_borda_da_serie():
     mensal = agregar_mensal(_diario_jan_parcial_fev_completo())
 
@@ -102,3 +116,29 @@ def test_agregar_mensal_nao_avisa_quando_todos_os_meses_completos():
         agregar_mensal(apenas_fevereiro)
     codigos = [w.message.codigo for w in record if hasattr(w.message, "codigo")]
     assert "INCOMPLETE_MONTH" not in codigos
+
+
+def test_metricas_mensais_reusam_as_funcoes_genericas_de_metrics(tmp_path):
+    # AGENTS.md épico 4.1 ("média/mediana mensal", "meses positivos", "pior
+    # mês"): não precisam de função nova -- tradefolio.metrics já é
+    # genérico sobre qualquer série (AGENTS.md §8.1), incluindo a mensal.
+    # Valores conferidos por script contra tests/fixtures/romanos_orders.csv
+    # antes deste teste (ver histórico da sessão).
+    import warnings as w
+
+    from tradefolio import metrics
+    from tradefolio.daily import agregar_diario
+    from tradefolio.loaders import carregar_ordens
+
+    with w.catch_warnings():
+        w.simplefilter("ignore")
+        ordens = carregar_ordens("tests/fixtures/romanos_orders.csv")
+        diario = preencher_calendario_b3(agregar_diario(ordens))
+        mensal = agregar_mensal(diario)
+
+    serie_mensal = mensal["liquido_por_contrato"]
+    assert len(mensal) == 16
+    assert serie_mensal.min() == pytest.approx(-245.5)  # pior mês
+    assert serie_mensal.mean() == pytest.approx(680.859375)  # média mensal
+    assert serie_mensal.median() == pytest.approx(621.25)  # mediana mensal
+    assert metrics.taxa_positivos(serie_mensal) == pytest.approx(0.9375)  # % meses positivos

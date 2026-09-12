@@ -45,6 +45,7 @@ def agregar_mensal(diario: pd.DataFrame) -> pd.DataFrame:
         bruto=("bruto", "sum"),
         custo=("custo", "sum"),
         liquido=("liquido", "sum"),
+        liquido_por_contrato=("liquido_por_contrato", "sum"),
         dias_operados=("operou", "sum"),
         pregoes=("operou", "size"),
         trades=("n_trades", "sum"),
