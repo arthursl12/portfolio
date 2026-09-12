@@ -805,3 +805,51 @@ convenção nova sem base no PDF-fonte. Ambas as UIs mostram uma nota
   Corrigir isso exigiria decidir como `app.py` deveria se comportar sem
   um `contratos_referencia` único (ex.: permitir entrada manual) — fora
   do escopo pedido nesta rodada.
+
+---
+
+## Custo mensal por faixa de contratos (fora dos épicos do PDF-fonte)
+
+Pedido explícito do usuário: nenhum dos dois PDFs-fonte descreve um custo
+mensal de plataforma/assinatura em degraus por número de contratos (só
+existia o emolumento B3 por perna, linear e por ordem —
+`tradefolio.costs`). Implementado em `src/tradefolio/custo_mensal.py`.
+`VERSOES["custo_mensal"]` = `"custo_mensal_v1"`.
+
+- [x] `FaixaCustoMensal(min_contratos, max_contratos, custo_mensal)` +
+  `TabelaCustoMensal(faixas)` — faixas com AMBOS os limites inclusivos
+  (`max_contratos=None` = sem teto); sobreposição entre faixas levanta
+  `ValueError` na construção em vez de escolher um desempate silencioso
+  para uma fronteira ambígua (o próprio exemplo do usuário, "1-5" e
+  "5-8", se sobrepõe em 5 — a tabela força quem a define a resolver isso)
+- [x] `custo_mensal_zero()` — convenience para o caso explícito de custo
+  0 (uma faixa única cobrindo 1 a ∞ contratos a R$0) — nunca um valor
+  inventado, 0 é uma escolha honesta como em `vapo.aliquota_fiscal`
+- [x] `aplicar_custo_mensal(diario, tabela, contratos_referencia)` —
+  debita o custo (da faixa correspondente ao número de contratos) no
+  ÚLTIMO PREGÃO B3 de cada mês presente em `diario`, reusando a mesma
+  convenção de apuração "último pregão do mês" já usada em
+  `tradefolio.vapo`/"lâmina ideal.pdf" §6 (não uma nova inventada).
+  Cobra mesmo em dia NO_TRADE e mesmo em mês parcial (mesmo
+  comportamento que `tradefolio.monthly` já tem para mês incompleto).
+  Nova coluna `custo_mensal`, separada de `custo` (que continua sendo só
+  o emolumento B3) — `liquido = bruto - custo - custo_mensal`,
+  `liquido_por_contrato` recomputado na mesma proporção
+- [x] Escopo só no `diario` agregado do robô inteiro, não no breakdown
+  por ativo (`daily.agregar_diario_por_ativo`) — uma assinatura de
+  plataforma não é atribuível a uma perna específica; ratear isso seria
+  uma convenção nova e arbitrária, não implementada
+- [x] `report_data.montar_dataframe_diario` ganhou `tabela_custo_mensal=None`
+  opcional (compatível com chamadas existentes) — quando informada,
+  aplica o custo antes de retornar o `diario`; como só toca
+  `liquido`/`liquido_por_contrato` (antes de qualquer drawdown/métrica/
+  mensal/limiar/vapo rodar), TUDO que já consome essas colunas reflete o
+  custo automaticamente, sem precisar mudar nenhum outro módulo —
+  verificado por script: lucro líquido, Sharpe, MDD e a reagregação
+  mensal mudam corretamente contra `tests/fixtures/romanos_orders.csv`
+- [ ] **Não wireado em `app.py`/`report.py` nesta rodada** — o pedido foi
+  sobre a lógica de cálculo ("deve ser contabilizado no lucro líquido e
+  em seus indicadores derivados"), já satisfeito e verificado
+  ponta-a-ponta a nível de biblioteca. Adicionar um input de UI (ex.
+  `st.data_editor` para a tabela de faixas) é a extensão natural, mas é
+  uma decisão de interface separada, não pedida ainda.

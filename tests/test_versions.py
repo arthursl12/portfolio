@@ -19,6 +19,7 @@ ETAPAS_IMPLEMENTADAS = (
     "consolidacao_mensal",
     "reconstrucao_trades",
     "custos",
+    "custo_mensal",
     "metricas",
     "drawdowns",
     "limiar",

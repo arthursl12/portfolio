@@ -6,6 +6,7 @@ import pandas as pd
 
 from tradefolio import concentracao, drawdowns, limiar, metrics
 from tradefolio.alignment import preencher_calendario_b3
+from tradefolio.custo_mensal import aplicar_custo_mensal
 from tradefolio.daily import (
     CONTRATOS_REFERENCIA_PADRAO,
     agregar_diario,
@@ -50,17 +51,28 @@ def filtrar_por_janela(diario: pd.DataFrame, janela: str) -> pd.DataFrame:
     return diario.loc[inicio:]
 
 
-def montar_dataframe_diario(csv_path, contratos_referencia: int = None) -> pd.DataFrame:
+def montar_dataframe_diario(
+    csv_path, contratos_referencia: int = None, tabela_custo_mensal=None,
+) -> pd.DataFrame:
     """`contratos_referencia=None` (padrão) detecta automaticamente a
     partir do próprio CSV (tradefolio.daily.detectar_contratos_referencia)
     -- AGENTS.md §9: cada robô tem seu próprio tamanho de posição, não
     pode ser assumido igual a outro. Passe um valor explícito só se
-    precisar sobrepor a detecção."""
+    precisar sobrepor a detecção.
+
+    `tabela_custo_mensal` (`custo_mensal.TabelaCustoMensal`, opcional):
+    quando informada, debita o custo mensal por faixa de contratos no
+    último pregão de cada mês (`custo_mensal.aplicar_custo_mensal`) antes
+    de retornar -- `None` (padrão) preserva o comportamento anterior sem
+    nenhum custo mensal, nunca inventando um valor."""
     ordens = carregar_ordens(csv_path)
     if contratos_referencia is None:
         contratos_referencia = detectar_contratos_referencia(ordens)
     diario = agregar_diario(ordens, contratos_referencia=contratos_referencia)
-    return preencher_calendario_b3(diario)
+    diario = preencher_calendario_b3(diario)
+    if tabela_custo_mensal is not None:
+        diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)
+    return diario
 
 
 def calcular_pagina1(

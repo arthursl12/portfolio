@@ -18,6 +18,7 @@ VERSOES = {
     "consolidacao_mensal": "monthly_v1",
     "reconstrucao_trades": "trades_v2",  # v2: pula ordens nao executadas (evitava trade fantasma)
     "custos": "custos_v1",
+    "custo_mensal": "custo_mensal_v1",  # assinatura/plataforma em degraus por faixa de contratos, pedido do usuario (fora dos epicos do PDF-fonte)
     "metricas": "metrics_v1",
     "drawdowns": "drawdowns_v1",
     "limiar": "limiar_v1",  # decompor_limiar (P95/P99 toggle, reserva = % da margem) + rlt_*/normalizar_por_limiar
