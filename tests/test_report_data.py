@@ -89,6 +89,8 @@ def test_pagina2_trades_e_ratios(diario, ordens):
     assert p2["profit_factor_trades"] == pytest.approx(0.657837, rel=1e-6)
     assert p2["lucro_medio_trade"] == pytest.approx(149.00)
     assert p2["prejuizo_medio_trade"] == pytest.approx(-151.00)
+    # AGENTS.md épico 4.5 "expectativa por operação": mean([199,99,-151,-301,-1])
+    assert p2["expectancia_por_trade"] == pytest.approx(-31.00)
 
 
 def test_pagina2_sequencias_trades_usam_datas_proprias_do_trade(diario, ordens):

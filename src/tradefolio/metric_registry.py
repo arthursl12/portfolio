@@ -255,6 +255,12 @@ _ENTRADAS = [
        "calculated", "metricas", _CAMPOS_ORDENS_TRADE,
        "Tamanho médio de um trade perdedor (valor negativo), líquido de custos B3 do trade.",
        "NaN sem nenhum trade perdedor.", tratamento_dado_ausente=_MES_INCOMPLETO_NA),
+    _m("expectancia_por_trade", "Expectância por operação", 2,
+       "mean(resultado_liquido de todos os trades) -- AGENTS.md épico 4.5",
+       "acumulada no período", "R$", "calculated", "metricas", _CAMPOS_ORDENS_TRADE,
+       "Resultado esperado de um trade médio, líquido de custos B3; matematicamente idêntico à "
+       "decomposição win_prob*ganho_medio - loss_prob*|perda_media| (ver tradefolio.metrics.expectancia).",
+       "não pondera pelo tamanho da posição de cada trade.", tratamento_dado_ausente=_MES_INCOMPLETO_NA),
     _m("maior_sequencia_positiva_trades", "Maior sequência positiva (trades)", 2,
        "maior corrida de trades consecutivos com resultado_liquido > 0; retorna comprimento, valor_total e datas de início/fim do próprio trade",
        "acumulada no período", "composto (contagem, R$, datas)", "calculated",

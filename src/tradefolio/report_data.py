@@ -113,6 +113,7 @@ def calcular_pagina2(diario: pd.DataFrame, ordens: pd.DataFrame) -> dict:
         "profit_factor_trades": metrics.profit_factor(resultado),
         "lucro_medio_trade": metrics.ganho_medio(resultado),
         "prejuizo_medio_trade": metrics.perda_media(resultado),
+        "expectancia_por_trade": metrics.expectancia(resultado),
         "maior_sequencia_positiva_trades": metrics.maior_sequencia_detalhada(
             resultado, True, trades["inicio"], trades["fim"]
         ),
