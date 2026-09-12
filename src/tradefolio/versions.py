@@ -20,8 +20,8 @@ VERSOES = {
     "custos": "custos_v1",
     "metricas": "metrics_v1",
     "drawdowns": "drawdowns_v1",
+    "limiar": "limiar_v1",  # decompor_limiar: percentil P95/P99 toggle, reserva = % da margem
     # não implementadas ainda -- ver roadmap (Épicos 6-10 da lâmina ideal)
-    "limiar": None,
     "vapo": None,
     "monte_carlo": None,
     "deterioracao": None,
