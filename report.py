@@ -1,3 +1,4 @@
+import argparse
 import base64
 import io
 
@@ -10,15 +11,18 @@ import matplotlib.dates as mdates
 
 from tradefolio.alignment import preencher_calendario_b3
 from tradefolio.daily import agregar_diario, detectar_contratos_referencia
+from tradefolio.drawdowns import episodios_drawdown
+from tradefolio.validation import extrair_raiz_ativo
 from tradefolio.report_data import (
     montar_dataframe_diario,
     calcular_pagina1 as calcular_metricas_pagina1,
     calcular_pagina2 as calcular_metricas_pagina2,
     calcular_pagina3 as calcular_metricas_pagina3,
+    calcular_pagina4 as calcular_metricas_pagina4,
+    calcular_pagina5 as calcular_metricas_pagina5,
+    calcular_pagina6 as calcular_metricas_pagina6,
 )
 from tradefolio.loaders import carregar_ordens
-
-CSV_PATH = "/mnt/user-data/uploads/orders_romanos.csv"
 
 
 def fig_para_base64(fig) -> str:
@@ -28,17 +32,60 @@ def fig_para_base64(fig) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def montar_figura_curva_drawdown(equity, drawdown, rotulo_valor="R$/contrato"):
+# Cores por faixa de duração de período submerso (lâmina ideal.pdf §3):
+# <=20 pregões amarelo, 21-60 laranja, >60 vermelho.
+_COR_SUBMERSO_CURTO = "#fef3c7"
+_COR_SUBMERSO_MEDIO = "#fed7aa"
+_COR_SUBMERSO_LONGO = "#fecaca"
+
+
+def _cor_por_duracao(duracao_pregoes: float) -> str:
+    if pd.isna(duracao_pregoes) or duracao_pregoes <= 20:
+        return _COR_SUBMERSO_CURTO
+    if duracao_pregoes <= 60:
+        return _COR_SUBMERSO_MEDIO
+    return _COR_SUBMERSO_LONGO
+
+
+def montar_figura_curva_drawdown(equity, drawdown, rotulo_valor="R$/contrato", episodios=None):
     """Constrói a figura (não fecha, não codifica) -- reaproveitada tanto
     pelo relatório HTML estático (via gerar_grafico_curva_drawdown) quanto
-    pela página Streamlit ao vivo (via st.pyplot)."""
+    pela página Streamlit ao vivo (via st.pyplot).
+
+    `episodios` (opcional, de tradefolio.drawdowns.calcular_episodios_drawdown
+    ou episodios_drawdown) adiciona as anotações do §3 da lâmina ideal:
+    sombreado dos períodos submersos por faixa de duração, marcação de
+    high-water marks (novos máximos da equity) e do melhor/pior dia
+    (derivado de equity.diff(), já que só a curva acumulada é recebida
+    aqui, não a série diária bruta). `None` (padrão) preserva o
+    comportamento anterior sem nenhuma anotação nova."""
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(10, 5.5), sharex=True, height_ratios=[2.2, 1],
         gridspec_kw={"hspace": 0.08},
     )
 
-    ax1.plot(equity.index, equity.values, color="#1f6feb", linewidth=1.3)
-    ax1.fill_between(equity.index, equity.values, 0, color="#1f6feb", alpha=0.07)
+    if episodios is not None and len(episodios):
+        for _, ep in episodios.iterrows():
+            fim = ep["data_recuperacao"] if ep["recuperado"] else equity.index[-1]
+            cor = _cor_por_duracao(ep["duracao_total_pregoes"])
+            ax1.axvspan(ep["inicio_pico"], fim, color=cor, alpha=0.5, zorder=0)
+
+        maximas_moveis = equity.cummax()
+        novos_maximos = equity[equity == maximas_moveis]
+        ax1.scatter(
+            novos_maximos.index, novos_maximos.values, color="#1a7f37", s=10,
+            zorder=3, label="Novo máximo (high-water mark)",
+        )
+
+        retornos_diarios = equity.diff()
+        retornos_diarios.iloc[0] = equity.iloc[0]
+        data_melhor, data_pior = retornos_diarios.idxmax(), retornos_diarios.idxmin()
+        ax1.scatter([data_melhor], [equity.loc[data_melhor]], color="#1a7f37", marker="^", s=70, zorder=4, label="Melhor dia")
+        ax1.scatter([data_pior], [equity.loc[data_pior]], color="#d1242f", marker="v", s=70, zorder=4, label="Pior dia")
+        ax1.legend(fontsize=7, frameon=False, loc="upper left")
+
+    ax1.plot(equity.index, equity.values, color="#1f6feb", linewidth=1.3, zorder=2)
+    ax1.fill_between(equity.index, equity.values, 0, color="#1f6feb", alpha=0.07, zorder=1)
     ax1.set_ylabel(f"Equity ({rotulo_valor})")
     ax1.grid(alpha=0.25)
     ax1.set_title(f"Curva de capital e drawdown — {rotulo_valor}", fontsize=12, loc="left")
@@ -153,6 +200,125 @@ def gerar_grafico_distribuicao(p3: dict) -> str:
     return fig_para_base64(montar_figura_distribuicao(p3))
 
 
+def gerar_secao_pagina4(p4: dict) -> str:
+    """Limiar (decomposição P95/P99), RLT e risco normalizado pelo limiar
+    (lâmina ideal.pdf §4/5/7)."""
+    ativo = p4["percentil_cauda_ativo"]
+
+    def linha_decomposicao(rotulo, chave):
+        v95, v99 = p4["limiar_p95"][chave], p4["limiar_p99"][chave]
+        marca95 = " ★" if ativo == 95 else ""
+        marca99 = " ★" if ativo == 99 else ""
+        return (
+            f"<tr><td class='rotulo'>{rotulo}</td>"
+            f"<td class='valor'>{fmt(v95, moeda=True)}{marca95}</td>"
+            f"<td class='valor'>{fmt(v99, moeda=True)}{marca99}</td></tr>"
+        )
+
+    limiar_recomendado_html = ""
+    if "limiar_recomendado" in p4["limiar_p95"]:
+        limiar_recomendado_html = linha_decomposicao("Limiar recomendado (arredondado)", "limiar_recomendado")
+
+    return f"""
+    <h2>Página 4 — Limiar e RLT (retorno sobre o limiar)</h2>
+    <p class="nota">★ marca o percentil ativo (usado no restante desta página). Histórico: {fmt(p4['meses_historico'], 1)} meses.</p>
+    <table>
+      <tr><th></th><th>P95</th><th>P99</th></tr>
+      <tr><td class="rotulo">Margem mínima</td><td class="valor">{fmt(p4['limiar_p95']['minimum_margin'], moeda=True)}</td><td class="valor">{fmt(p4['limiar_p99']['minimum_margin'], moeda=True)}</td></tr>
+      {linha_decomposicao('Reserva de cauda (drawdown)', 'tail_drawdown_reserve')}
+      {linha_decomposicao('Prêmio por histórico curto', 'uncertainty_premium')}
+      {linha_decomposicao('Reserva operacional', 'operational_reserve')}
+      <tr><td class="rotulo"><strong>Limiar bruto</strong></td><td class="valor"><strong>{fmt(p4['limiar_p95']['limiar_bruto'], moeda=True)}</strong></td><td class="valor"><strong>{fmt(p4['limiar_p99']['limiar_bruto'], moeda=True)}</strong></td></tr>
+      {limiar_recomendado_html}
+    </table>
+    <p class="nota">Limiar ativo: {fmt(p4['limiar_ativo'], moeda=True)} (posição total, não por contrato).</p>
+
+    <h3 style="margin-top:22px; font-size:14px;">Retorno sobre o limiar (RLT)</h3>
+    <table>
+      <tr><td class="rotulo">RLT acumulado</td><td class="valor">{fmt(p4['rlt_acumulado']*100)}%</td></tr>
+      <tr><td class="rotulo">RLT anualizado</td><td class="valor">{fmt(p4['rlt_anualizado']*100)}%</td></tr>
+      <tr><td class="rotulo">RLT mensal médio / mediano</td><td class="valor">{fmt(p4['rlt_mensal_medio']*100)}% / {fmt(p4['rlt_mensal_mediano']*100)}%</td></tr>
+      <tr><td class="rotulo">RLT móvel 3 / 6 / 12 meses</td><td class="valor">{fmt(p4['rlt_movel_3']*100)}% / {fmt(p4['rlt_movel_6']*100)}% / {fmt(p4['rlt_movel_12']*100)}%</td></tr>
+    </table>
+
+    <h3 style="margin-top:22px; font-size:14px;">Risco normalizado pelo limiar</h3>
+    <table>
+      <tr><td class="rotulo">MDD</td><td class="valor">{fmt(p4['mdd_total'], moeda=True)} &middot; {fmt(p4['mdd_sobre_limiar']*100)}% do limiar</td></tr>
+      <tr><td class="rotulo">Pior dia</td><td class="valor">{fmt(p4['pior_dia_total'], moeda=True)} &middot; {fmt(p4['pior_dia_sobre_limiar']*100)}% do limiar</td></tr>
+      <tr><td class="rotulo">Expected Shortfall 95%</td><td class="valor">{fmt(p4['es95_total'], moeda=True)} &middot; {fmt(p4['es95_sobre_limiar']*100)}% do limiar</td></tr>
+      <tr><td class="rotulo">Ulcer Index</td><td class="valor">{fmt(p4['ulcer_total'], moeda=True)} &middot; {fmt(p4['ulcer_sobre_limiar']*100)}% do limiar</td></tr>
+      <tr><td class="rotulo">Pior mês</td><td class="valor">{fmt(p4['pior_mes_total'], moeda=True)} &middot; {fmt(p4['pior_mes_sobre_limiar']*100)}% do limiar</td></tr>
+    </table>
+    <p class="nota">Escala TOTAL da posição (não por contrato) -- minimum_margin é da posição toda. RLT/MDD-L/etc. dependem dos parâmetros de limiar escolhidos (percentil, reserva operacional); não compare entre robôs calculados com parâmetros diferentes.</p>
+    """
+
+
+_SEVERIDADE_CSS = {"critical": "#d1242f", "high": "#bc4c00", "medium": "#9a6700"}
+
+
+def gerar_secao_pagina5(p5: dict) -> str:
+    """Qualidade da curva: concentração, lucro removendo eventos,
+    permanência abaixo de zero, alertas automáticos (lâmina ideal.pdf §9)."""
+    alertas_html = "<p class='nota'>Nenhum alerta disparado.</p>"
+    if p5["alertas"]:
+        itens = "".join(
+            f"<li style='color:{_SEVERIDADE_CSS.get(a['severity'], '#57606a')}'>"
+            f"<strong>[{a['severity'].upper()}]</strong> {a['message']}</li>"
+            for a in p5["alertas"]
+        )
+        alertas_html = f"<ul>{itens}</ul>"
+
+    ultima_neg = p5["ultima_data_negativa"]
+    ultima_neg_str = ultima_neg.strftime("%d/%m/%Y") if ultima_neg is not None else "nunca ficou negativa"
+
+    return f"""
+    <h2>Página 5 — Qualidade da curva</h2>
+    <table>
+      <tr><td class="rotulo">Top 1 / 5 / 10 dias (participação no lucro)</td><td class="valor">{fmt(p5['top1_dia']*100)}% / {fmt(p5['top5_dias']*100)}% / {fmt(p5['top10_dias']*100)}%</td></tr>
+      <tr><td class="rotulo">Melhor mês / Top 3 meses (participação no lucro)</td><td class="valor">{fmt(p5['melhor_mes_share']*100)}% / {fmt(p5['top3_meses_share']*100)}%</td></tr>
+      <tr><td class="rotulo">Lucro sem o melhor dia / sem os 5 melhores dias</td><td class="valor">{fmt(p5['lucro_sem_melhor_dia'], moeda=True)} / {fmt(p5['lucro_sem_top5_dias'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Lucro sem o melhor mês / sem os 3 melhores meses</td><td class="valor">{fmt(p5['lucro_sem_melhor_mes'], moeda=True)} / {fmt(p5['lucro_sem_top3_meses'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Lucro antes dos últimos 60 dias</td><td class="valor">{fmt(p5['lucro_antes_dos_ultimos_60_dias'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">% de pregões com equity negativa</td><td class="valor">{fmt(p5['pct_dias_abaixo_de_zero']*100)}%</td></tr>
+      <tr><td class="rotulo">Última data com equity negativa</td><td class="valor">{ultima_neg_str}</td></tr>
+      <tr><td class="rotulo">Pregões desde a consolidação positiva</td><td class="valor">{p5['pregoes_desde_consolidacao_positiva']}</td></tr>
+    </table>
+    <h3 style="margin-top:22px; font-size:14px;">Alertas automáticos</h3>
+    {alertas_html}
+    """
+
+
+def gerar_secao_pagina6(p6: dict) -> str:
+    """Comparação entre ativos internos (lâmina ideal.pdf §12) -- só deve
+    ser chamada para robôs com mais de um ativo_raiz."""
+    linhas_ativos = "".join(
+        f"<tr><td class='rotulo'>{a}</td>"
+        f"<td class='valor'>{fmt(p6['lucro_por_ativo'][a], moeda=True)}</td>"
+        f"<td class='valor'>{fmt(p6['mdd_por_ativo'][a], moeda=True)}</td></tr>"
+        for a in p6["ativos"]
+    )
+    corr = p6["correlacao_ativos"]
+    cabecalho_corr = "".join(f"<th>{a}</th>" for a in corr.columns)
+    linhas_corr = "".join(
+        f"<tr><td class='rotulo'>{a}</td>" + "".join(f"<td class='valor'>{fmt(corr.loc[a, b], 3)}</td>" for b in corr.columns) + "</tr>"
+        for a in corr.index
+    )
+
+    return f"""
+    <h2>Página 6 — Comparação entre ativos</h2>
+    <table>
+      <tr><th>Ativo</th><th>Lucro líquido</th><th>Maximum Drawdown</th></tr>
+      {linhas_ativos}
+    </table>
+    <h3 style="margin-top:22px; font-size:14px;">Correlação diária (todos os dias)</h3>
+    <table>
+      <tr><th></th>{cabecalho_corr}</tr>
+      {linhas_corr}
+    </table>
+    <p class="nota">Escala bruta (não por contrato) -- ver limitações em tradefolio.metric_registry (ativo sem referência de contrato estável não é normalizado). Correlação considera todos os dias, inclusive os que um dos ativos não operou (0); variantes por regime (dias ruins, alta volatilidade) não implementadas.</p>
+    """
+
+
 def gerar_secao_pagina3(p3: dict) -> str:
     pct = p3["percentis"]
     piores = "".join(f"<li>{d.strftime('%d/%m/%Y')}: {fmt(v, moeda=True)}</li>" for d, v in p3["piores_5"].items())
@@ -178,7 +344,20 @@ def gerar_secao_pagina3(p3: dict) -> str:
     """
 
 
-def gerar_html(metricas: dict, grafico_b64: str, grafico_dist_b64: str = "", secao_pagina2: str = "", secao_pagina3: str = "", robo: str = "Romanos") -> str:
+_FORA_DE_ESCOPO = (
+    "Não implementado nesta versão (lâmina ideal.pdf): vapo/política de retirada, "
+    "Monte Carlo/bootstrap, grade de deterioração, linha do tempo de mudanças de mão, "
+    "selo de tipo de histórico, score geral, módulo de portfólio, schema JSON para IA. "
+    "Ver TASKS.md para o que cada um exigiria antes de ser implementado."
+)
+
+
+def gerar_html(
+    metricas: dict, grafico_b64: str, grafico_dist_b64: str = "",
+    secao_pagina2: str = "", secao_pagina3: str = "",
+    secao_pagina4: str = "", secao_pagina5: str = "", secao_pagina6: str = "",
+    robo: str = "Romanos",
+) -> str:
     p_ini, p_fim = metricas["periodo"]
     linhas = [
         ("Período", f"{p_ini.strftime('%d/%m/%Y')} a {p_fim.strftime('%d/%m/%Y')}"),
@@ -266,22 +445,48 @@ def gerar_html(metricas: dict, grafico_b64: str, grafico_dist_b64: str = "", sec
     <img src="data:image/png;base64,{grafico_dist_b64}" alt="Distribuição do resultado diário">
     {secao_pagina3}
 
+    {secao_pagina4}
+    {secao_pagina5}
+    {secao_pagina6}
+
     <p class="nota">
       Ulcer Index e Maximum Drawdown % calculados com patrimônio = R$1.000/contrato (margem sugerida pelo autor) + resultado acumulado, drawdown% relativo ao pico móvel — mesma lógica da Smarttbot.<br>
       Trade reconstruído a partir da posição líquida (agrupa fills parciais); há 1 trade a menos que o reportado pela plataforma (~R$424, provavelmente anterior ao início do CSV) — assumido como aceitável.
     </p>
+    <p class="nota">{_FORA_DE_ESCOPO}</p>
   </div>
 </body>
 </html>"""
 
 
+def _parse_argumentos():
+    parser = argparse.ArgumentParser(
+        description="Gera a lâmina HTML estática a partir de um CSV de ordens Smarttbot."
+    )
+    parser.add_argument("csv_path", help="Caminho do CSV de ordens")
+    parser.add_argument("output_path", help="Caminho do HTML a gerar")
+    parser.add_argument(
+        "--minimum-margin", type=float, required=True,
+        help="Margem mínima da posição total (R$) -- obrigatório, nunca inventado (AGENTS.md §8)",
+    )
+    parser.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
+    parser.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
+    parser.add_argument("--increment", type=float, default=500.0)
+    parser.add_argument("--robo", default=None, help="Nome do robô no título (padrão: nome do arquivo)")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    ordens = carregar_ordens(CSV_PATH)
+    args = _parse_argumentos()
+    robo = args.robo or args.csv_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+
+    ordens = carregar_ordens(args.csv_path)
     contratos_referencia = detectar_contratos_referencia(ordens)
     diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
 
     metricas, equity, drawdown = calcular_metricas_pagina1(diario, contratos_referencia=contratos_referencia)
-    grafico_b64 = gerar_grafico_curva_drawdown(equity, drawdown)
+    episodios = episodios_drawdown(equity, top_n=len(equity))
+    grafico_b64 = fig_para_base64(montar_figura_curva_drawdown(equity, drawdown, episodios=episodios))
 
     p2 = calcular_metricas_pagina2(diario, ordens)
     metricas["n_trades_reconstruidos"] = p2["n_trades"]
@@ -295,9 +500,25 @@ if __name__ == "__main__":
     grafico_dist_b64 = gerar_grafico_distribuicao(p3)
     secao_pagina3 = gerar_secao_pagina3(p3)
 
-    html = gerar_html(metricas, grafico_b64, grafico_dist_b64, secao_pagina2, secao_pagina3)
+    p4 = calcular_metricas_pagina4(
+        diario, minimum_margin=args.minimum_margin, percentil_cauda=args.percentil_cauda,
+        fracao_reserva_operacional=args.fracao_reserva_operacional, increment=args.increment,
+    )
+    secao_pagina4 = gerar_secao_pagina4(p4)
 
-    out_path = "/mnt/user-data/outputs/lamina_romanos_pagina1.html"
-    with open(out_path, "w", encoding="utf-8") as f:
+    p5 = calcular_metricas_pagina5(diario)
+    secao_pagina5 = gerar_secao_pagina5(p5)
+
+    secao_pagina6 = ""
+    if ordens["Ativo"].map(extrair_raiz_ativo).nunique() > 1:
+        p6 = calcular_metricas_pagina6(ordens)
+        secao_pagina6 = gerar_secao_pagina6(p6)
+
+    html = gerar_html(
+        metricas, grafico_b64, grafico_dist_b64, secao_pagina2, secao_pagina3,
+        secao_pagina4, secao_pagina5, secao_pagina6, robo=robo,
+    )
+
+    with open(args.output_path, "w", encoding="utf-8") as f:
         f.write(html)
-    print("Salvo em:", out_path)
+    print("Salvo em:", args.output_path)
