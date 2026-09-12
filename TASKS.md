@@ -1,10 +1,20 @@
-# Tasks — Épicos 0–6
+# Tasks — Épicos 0–11
 
-Derived from `prompts/tarefas e epicos.pdf` (Épicos 0–6 only, per request) and
-cross-checked against the current codebase so status reflects what's
-actually implemented, not what's planned. `[x]` = done, `[~]` = partially
-done (gap noted), `[ ]` = not started. File/function names point at the
-existing implementation or the natural place to add new code.
+Derived from `prompts/tarefas e epicos.pdf` and cross-checked against the
+current codebase so status reflects what's actually implemented, not what's
+planned. `[x]` = done, `[~]` = partially done (gap noted), `[ ]` = not
+started. File/function names point at the existing implementation or the
+natural place to add new code.
+
+Épicos 7–11 (vapo, Monte Carlo/robustez, run-up/barreiras, portfólio,
+lâmina visual no Streamlit) are pure **planning** — nothing in them is
+implemented yet. Each task below notes what already exists to build on,
+what would need a genuine decision before any code is written (AGENTS.md
+§8/§24: never invent a financial convention silently), and cross-épico
+dependencies. Where `prompts/tarefas e epicos.pdf` gives a concrete
+formula/example, it's cited directly instead of guessed at. Épicos 12+
+(API para IA, camada de IA, score e triagem) were not requested and are not
+covered here.
 
 ---
 
@@ -362,6 +372,356 @@ resolvidas pelo usuário (não inventadas): percentil da cauda é um toggle
   operational_reserve, limiar_bruto, limiar_recomendado se `increment`
   informado) — satisfaz "mostrar a decomposição, não só o número final"
   sem precisar de uma estrutura de exibição separada
+
+---
+
+## Épico 7 — Motor de vapo
+
+Nada implementado. `src/tradefolio/vapo.py` (sugerido). Desbloqueado pelo
+Épico 6 (limiar já existe) para as políticas que usam o limiar como piso;
+`monthly.agregar_mensal` já dá o P&L/custo mensal que a tarefa 7.3 precisa
+como entrada. `VERSOES["vapo"]` já existe como `None` em `versions.py`
+(épico 0.3) — vira uma string de versão real quando 7.1/7.3 forem
+implementadas.
+
+### Tarefa 7.1 — Política de piso fixo
+- [ ] `vapo = max(0, saldo_antes_do_vapo - limiar)` — mas "saldo" é
+  cumulativo desde o início ou desde a última retirada? O PDF-fonte (7.3)
+  descreve um "déficit anterior" carregado mês a mês, o que sugere que 7.1
+  não é uma função isolada e sim um caso particular do motor stateful da
+  tarefa 7.3 (piso fixo = a política mais simples desse motor). Decidir
+  isso faz parte de desenhar 7.3, não de 7.1 sozinha.
+
+### Tarefa 7.2 — Suportar políticas alternativas
+- [ ] Sete políticas nomeadas no PDF-fonte (100% do excedente; percentual
+  do excedente; teto mensal; percentual do lucro; somente mês positivo;
+  preservação do capital inicial; reserva tributária; acumulação para
+  aumento de mão) — cada uma precisa de uma fórmula explícita decidida
+  ANTES de codificar (AGENTS.md §8): "percentual do lucro", por exemplo,
+  não diz se é lucro bruto ou líquido, mensal ou acumulado. Nenhuma
+  política deve ser adivinhada a partir do nome.
+- [ ] Interface comum sugerida (mesmo padrão de `tradefolio.importers.OrderImporter`,
+  ABC com épico 1.2 como precedente): uma `PoliticaVapo` com um método
+  `aplicar(saldo_antes_do_vapo, deficit_anterior, limiar) -> (vapo_bruto, novo_deficit)`,
+  para que 7.3 componha qualquer política sem conhecer sua fórmula interna.
+
+### Tarefa 7.3 — Gerar série de vapo
+- [ ] Motor mensal stateful: saldo_inicial, P&L bruto, custos, P&L líquido
+  (de `monthly.agregar_mensal`), saldo_antes_do_vapo = saldo_inicial +
+  líquido, déficit_anterior (carregado do mês anterior quando o vapo
+  ficou limitado a 0), vapo_bruto (via `PoliticaVapo` da tarefa 7.2),
+  provisão fiscal, vapo_líquido, saldo_final = saldo_antes_do_vapo -
+  vapo_líquido.
+- [ ] Provisão fiscal precisa de uma alíquota — **nunca inventar um valor
+  de imposto**; deve ser `user_input` explícito (0% é uma escolha válida,
+  não um padrão silencioso) ou o campo fica ausente/None quando não
+  informado, nunca um número assumido.
+
+### Tarefa 7.4 — Criar métricas do vapo
+- [ ] VLT (vapo sobre o limiar) é literalmente `limiar.normalizar_por_limiar(vapo, limiar_ativo)`
+  — já existe, reuso direto, mesmo padrão de RLT (AGENTS.md §8.1). VLT
+  acumulado/mensal/médio/mediano espelham `rlt_acumulado`/`rlt_mensal`/etc.
+  estruturalmente — quando a série de vapo (7.3) existir, essas quatro
+  métricas são praticamente gratuitas.
+- [ ] Frequência de meses com vapo, maior vapo, meses consecutivos sem
+  vapo — mesma lógica de sequência já usada em
+  `metrics.maior_sequencia`/`maior_sequencia_detalhada`, reuso de padrão.
+- [ ] "Meses positivos sem vapo por causa de drawdown anterior" (também
+  citado na "lâmina ideal.pdf" §6) — precisa cruzar mês positivo (já
+  calculável) com déficit_anterior > 0 (vem de 7.3); não é uma métrica
+  isolada, depende do motor stateful existir primeiro.
+- [ ] Déficit atual em relação ao limiar — `saldo_final` (de 7.3) vs.
+  limiar, mesma normalização de 4.4.
+
+### Tarefa 7.5 — Criar calendário visual
+- [ ] Camada de apresentação (app.py/report.py), bloqueada por 7.3/7.4
+  terem dados para mostrar. O PDF-fonte sugere Plotly/streamlit-aggrid —
+  isso seria uma dependência nova (AGENTS.md §18: mudança de dependência
+  exige justificativa); avaliar primeiro se o `report.py`/matplotlib já
+  usado no resto da lâmina dá conta de um calendário mensal colorido
+  antes de adicionar uma biblioteca só para isso.
+
+---
+
+## Épico 8 — Monte Carlo e robustez
+
+Nada implementado. `VERSOES["monte_carlo"]` e `VERSOES["deterioracao"]` já
+existem como `None`. `ORIGENS_VALIDAS` (metric_registry, épico 0.2) já
+inclui `"simulated"` — a categoria de origem para tudo que este épico
+produzir já está prevista, não precisa ser inventada agora.
+
+### Tarefa 8.1 — Bootstrap diário sincronizado
+- [ ] Sortear a LINHA diária inteira (não cada ativo/robô independente) —
+  `daily.pivotar_liquido_por_ativo` já produz exatamente o formato
+  necessário como entrada (uma linha por data, uma coluna por ativo, já
+  alinhado no mesmo calendário) para manter WIN/WDO sincronizados por
+  data. Para portfólio (Épico 10, não iniciado), o mesmo padrão se
+  estenderia a colunas por robô.
+- [ ] Decisão em aberto: reamostrar sobre o histórico inteiro ou uma
+  janela mais recente? O PDF-fonte só diz "sortear a linha diária
+  inteira", sem especificar o universo de amostragem — assumir histórico
+  inteiro é razoável, mas deveria ser confirmado, não assumido em
+  silêncio.
+
+### Tarefa 8.2 — Circular block bootstrap
+- [ ] Técnica padrão (blocos contíguos com wraparound), tamanhos de bloco
+  5/10/20/40 pregões como OPÇÕES (não um valor fixo — mesmo espírito do
+  toggle P95/P99 do limiar: AGENTS.md §8.1, não inventar uma escolha
+  única quando o PDF-fonte já lista várias). Parâmetros obrigatórios do
+  PDF: seed, trajetórias, horizonte, bloco, frequência, tratamento dos
+  zeros.
+- [ ] Seed deve ser sempre reportado junto do resultado, nunca fixado
+  silenciosamente — mesmo princípio de proveniência já aplicado em
+  `metric_registry` (nunca misturar dado observado com simulado sem
+  rótulo).
+- [ ] Tratamento dos zeros: dias NO_TRADE (operou=False) são histórico
+  legítimo e deveriam ser reamostrados normalmente como qualquer outro
+  dia — mas o PDF-fonte pede que isso seja um parâmetro explícito, não
+  uma decisão silenciosa do código.
+
+### Tarefa 8.3 — Cenários deteriorados
+- [ ] Seis transformações independentes e compostáveis: redução dos
+  ganhos, ampliação das perdas, aumento dos custos, slippage adicional,
+  remoção dos melhores dias, duplicação dos piores dias — cada uma é uma
+  função pura sobre a série diária.
+- [ ] "Aumento de custos" reusa `costs.custo_b3` com um multiplicador —
+  trivial uma vez que a grade de deterioração exista.
+- [ ] A grade 0%/10%/20%/30% de "lâmina ideal.pdf" §10 (redução de ganhos
+  × aumento de perdas) já dá um exemplo concreto de degraus a seguir, em
+  vez de inventar uma grade nova.
+
+### Tarefa 8.4 — Produzir percentis
+- [ ] Agregação pura sobre as trajetórias simuladas (lucro P5/P25/P50/
+  P75/P95; MDD P50/P90/P95/P99; pior mês; TUW; VLT; probabilidade de
+  prejuízo/de tocar a margem/de terminar abaixo do limiar) —
+  `metrics.percentil` já é genérico o suficiente para isso; uma vez que
+  8.1-8.3 produzam uma tabela de trajetórias (linhas = trajetória,
+  colunas = lucro total/MDD/etc.), esta tarefa é mecânica, sem fórmula
+  nova.
+- [ ] "Probabilidade de tocar a margem"/"terminar abaixo do limiar" usam
+  a mesma decisão de escala já resolvida para o limiar (posição total,
+  não por contrato) — não é uma ambiguidade nova.
+
+### Tarefa 8.5 — Processar em background
+- [ ] Decisão de arquitetura, mesma categoria da Épico 1.4 (pilha de
+  persistência) — genuinamente bloqueada até 1.4 ser decidido, já que
+  "progresso salvo no DuckDB" (sugestão do próprio PDF) pressupõe a
+  escolha de tecnologia de 1.4. Alternativa: um MVP descartável
+  (`concurrent.futures.ProcessPoolExecutor`, cache em memória) marcado
+  explicitamente como não-durável até 1.4 ser resolvido.
+
+### Tarefa 8.6 — Cachear resultados
+- [ ] A chave de cache (hash da série, versão do modelo, seed,
+  trajetórias, horizonte, bloco, deterioração, custos, política de vapo)
+  espelha o que `tradefolio.versions.VERSOES` já faz por etapa — extensão
+  natural: quando 8.1-8.3 existirem, `VERSOES["monte_carlo"]` deixa de
+  ser `None` e essa string entra na chave. Ainda bloqueada pela decisão
+  de armazenamento de 8.5.
+
+---
+
+## Épico 9 — Run-up e barreiras
+
+Nada implementado. Nenhuma etapa "run_up"/"barreiras" existe ainda em
+`tradefolio.versions.VERSOES` (diferente de vapo/monte_carlo/deterioração,
+que já têm o placeholder `None`) — precisa ser adicionada quando este
+épico começar. 9.1/9.2 são calculáveis sobre dados históricos, sem
+depender do Épico 8; 9.3/9.4 dependem do motor de Monte Carlo existir.
+
+### Tarefa 9.1 — Implementar maximum run-up
+- [ ] Imagem espelhada de `drawdowns.calcular_episodios_drawdown`: em vez
+  de maior queda desde um pico, maior alta desde um fundo. Candidato
+  forte a reuso sem fórmula nova: verificar algebricamente se
+  `calcular_episodios_drawdown(-equity)` com o sinal invertido já produz
+  os episódios de run-up corretos, antes de escrever uma função paralela
+  do zero (mesmo espírito de reuso desta sessão, ex. `rlt_*`/
+  `normalizar_por_limiar` compartilhando uma única fórmula genérica).
+
+### Tarefa 9.2 — Calcular melhores janelas
+- [ ] Retorno máximo em janela MÓVEL (não blocos fixos contíguos como
+  `concentracao.dividir_em_subperiodos`) para 5/21/63/126/252 pregões —
+  `serie.rolling(n).sum().max()` por tamanho de janela. Função nova mas
+  simples, genérica sobre `n` (um parâmetro, não cinco funções fixas —
+  mesmo padrão de `limiar.rlt_movel`/`concentracao.metricas_por_subperiodo`).
+
+### Tarefa 9.3 — Implementar barreira dupla
+- [ ] **Bloqueada pelo Épico 8.** As saídas do PDF-fonte (probabilidade de
+  atingir a barreira positiva primeiro, a negativa primeiro, nenhuma,
+  tempo mediano) são inerentemente um resultado de tempo-de-primeira-
+  passagem sobre trajetórias SIMULADAS, não algo calculável a partir de
+  uma única série histórica. Não tentar implementar antes de 8.1/8.2
+  existirem.
+
+### Tarefa 9.4 — Usar barreiras para aumento de mão
+- [ ] Depende de 9.3 (bloqueada) + do limiar (Épico 6, já disponível) —
+  uma camada de decisão de dimensionamento de posição sobre as
+  probabilidades de barreira, uma vez que existam.
+
+---
+
+## Épico 10 — Portfólio
+
+Nada implementado — o maior gap arquitetural encontrado até agora: todo
+`tradefolio.*` opera sobre UM `ordens`/`diario` por vez; não existe
+nenhum conceito de carregar e sincronizar múltiplos robôs simultaneamente.
+`domain.py` já lista `Portfolio`/`PortfolioAllocation` como deliberadamente
+não implementados por dependerem deste épico (Épico 2, tarefa 2.1).
+`VERSOES["portfolio"]` já existe como `None` (tarefa 0.3). Tarefa 10.1 é
+pré-requisito de tudo o resto do épico.
+
+### Tarefa 10.1 — Sincronizar estratégias por data
+- [ ] Carregar N `ordens`/`diario` (um por robô) e alinhá-los num índice
+  de datas comum, distinguindo por (robô, data): não operou (já existe,
+  `operou=False`), robô não existia ainda naquela data (série daquele
+  robô não cobre essa data) e dado ausente (MISSING_DATA -- mesma lacuna
+  já documentada como não implementada em `alignment.py` por falta de um
+  sinal independente, tarefa 3.3; agora relevante em escala de
+  portfólio, onde esse sinal passaria a existir: um robô ausente do
+  portfólio quando outros do mesmo período têm dado é evidência de
+  MISSING_DATA, não de NO_TRADE).
+- [ ] Lugar natural: generalizar o padrão de
+  `daily.pivotar_liquido_por_ativo` (hoje "por ativo dentro de um robô")
+  para "por robô dentro de um portfólio" -- mesmo reshape, escopo maior.
+
+### Tarefa 10.2 — Suportar quantidades e multiplicadores
+- [ ] `PortfolioAllocation(strategy_id, multiplier, active_from)` — mapeia
+  quase 1:1 sobre `StrategyConfiguration` (`domain.py`, já resolvido no
+  Épico 2 com `valid_from`/`valid_to`); seria um dataclass irmão, não uma
+  reformulação do que já existe.
+
+### Tarefa 10.3 — Calcular métricas agregadas
+- [ ] P&L, margem, MDD, ES, TUW, lucro mensal, custo total — a fórmula de
+  cada uma já existe (`drawdowns.py`/`metrics.py`/`monthly.py`); a única
+  coisa nova é aplicá-las à série COMBINADA das estratégias sincronizadas
+  (10.1), não somar as métricas individuais (MDD de uma soma de séries
+  não é a soma dos MDDs individuais).
+- [ ] RLT — mesma composição de `limiar.rlt_*`, uma vez que exista um
+  limiar agregado (tarefa 10.6).
+- [ ] VLT — bloqueado pelo Épico 7 (vapo não existe).
+
+### Tarefa 10.4 — Calcular correlações múltiplas
+- [ ] "Correlação geral" é a mesma fórmula já usada em
+  `report_data.calcular_pagina6` (Pearson sobre séries diárias
+  sincronizadas), generalizada de ativos-dentro-de-um-robô para
+  robôs-dentro-de-um-portfólio -- reuso direto do padrão, não uma fórmula
+  nova.
+- [ ] As outras 4 variantes (dias em que ambos operaram; piores 20%; alta
+  volatilidade; perdas) são EXATAMENTE a mesma lacuna já documentada para
+  `calcular_pagina6` (ver seção "Lâmina ideal.pdf — wiring" abaixo): cada
+  uma exige decidir uma convenção extra (o que conta como "dia ruim"? qual
+  limiar de volatilidade?) antes de codificar. Não é uma ambiguidade nova
+  deste épico -- é a mesma adiada antes, reaparecendo em escala de
+  portfólio.
+- [ ] Correlação móvel (janela deslizante) — nova, mas mecânica uma vez
+  que a correlação geral (par a par) exista.
+
+### Tarefa 10.5 — Calcular contribuição marginal
+- [ ] Para cada robô: recomputar o portfólio inteiro com e sem aquele
+  robô (10.1–10.4) e diferenciar lucro/MDD/ES — mecânico uma vez que 10.1
+  exista, mas caro computacionalmente (N+1 recomputações completas para N
+  robôs; não otimizar prematuramente antes de medir).
+- [ ] Diferença de limiar/VLT — herdam as dependências de 10.6 e do
+  Épico 7 (VLT), respectivamente.
+
+### Tarefa 10.6 — Calcular limiar agregado
+- [ ] Fórmula dada explicitamente pelo PDF-fonte: `portfolio_threshold =
+  total_minimum_margin + portfolio_tail_drawdown + uncertainty_premium +
+  operational_reserve` — literalmente a mesma assinatura de
+  `limiar.decompor_limiar`, só que alimentada pela margem mínima somada e
+  pelo `drawdown_serie` da série COMBINADA (10.1/10.3) em vez de um único
+  robô. Reuso direto, sem fórmula nova. O PDF-fonte avisa explicitamente
+  para NÃO somar os limiares individuais -- o resultado agregado usa a
+  MESMA função, só que sobre dados diferentes.
+
+### Tarefa 10.7 — Calcular benefício da diversificação
+- [ ] `soma dos limiares individuais - limiar agregado (10.6)`, em R$ e
+  em % — trivial uma vez que 10.6 e a soma dos limiares individuais
+  existam; nenhuma fórmula nova.
+
+### Tarefa 10.8 — Otimização de portfólio
+- [ ] Busca discreta (não otimização contínua, conforme o PDF-fonte pede
+  explicitamente) sobre combinações de alocação, com objetivos
+  configuráveis (maximizar RLT/VLT, minimizar MDD/L, maximizar lucro com
+  limite de MDD, etc.) — decisão de dependência nova antes de começar
+  (SciPy Optimize/CVXPY/Optuna/produto cartesiano discreto, AGENTS.md
+  §18).
+- [ ] O próprio PDF-fonte avisa para aplicar penalidade por múltiplas
+  tentativas e nunca reportar só o melhor resultado da amostra (risco de
+  sobreajuste de busca) — esse aviso deveria virar um requisito de teste
+  (verificar que a busca não superajusta numa amostra sintética), não só
+  uma nota de rodapé na implementação.
+
+---
+
+## Épico 11 — Lâmina visual no Streamlit
+
+Reorganização/expansão de `app.py` -- não introduz cálculo novo por si só.
+Vários itens dependem de dados que ainda não existem (vapo: Épico 7;
+robustez: Épico 8; portfólio: Épico 10; "qualidade dos dados" como nota:
+Épico 14 do PDF-fonte, fora do escopo pedido nesta rodada). Duas tarefas
+(11.5, 11.6) não dependem de nenhum outro épico e podem ser feitas a
+qualquer momento.
+
+### Tarefa 11.1 — Criar página de resumo
+- [ ] Nome, Período, Configuração, Margem, Limiar, RLT, MDD/L já são
+  exibidos em `app.py` hoje (dispersos em vários `st.expander`s, não numa
+  única "primeira dobra" compacta) — reorganização de UI, não cálculo
+  novo.
+- [ ] Status (verde/amarelo/laranja/vermelho/cinza, "lâmina ideal.pdf"
+  §2) — os limiares de corte para cada cor nunca foram definidos
+  numericamente em nenhum dos dois PDFs-fonte; decidir isso é uma
+  convenção nova a confirmar, não a inventar.
+- [ ] VLT — bloqueado pelo Épico 7.
+- [ ] "Qualidade dos dados" (nota 0–100) — é o score do Épico 14 do
+  PDF-fonte (não 10/11), fora do escopo desta lista; `app.py` hoje não
+  tem nenhuma pontuação, só métricas brutas.
+
+### Tarefa 11.2 — Criar gráfico principal
+- [ ] Equity, high-water marks e drawdowns já existem
+  (`report.montar_figura_curva_drawdown`, construído nesta sessão) -- em
+  matplotlib, não Plotly como o PDF-fonte sugere. Trocar ou adicionar
+  Plotly é uma dependência nova (AGENTS.md §18) a justificar antes de
+  substituir o que já funciona.
+- [ ] "Mudanças de mão" e "versões" como anotações no gráfico — mesma
+  lacuna já documentada (Épico 2.2/3.2): não existe detecção de ponto de
+  mudança de configuração, e inventar uma agora seria adivinhar.
+- [ ] "Períodos sem dados" — depende de MISSING_DATA existir como sinal
+  independente (não implementado, ver `alignment.py`), mesma lacuna da
+  tarefa 3.3 (e agora também da 10.1, em escala de portfólio).
+
+### Tarefa 11.3 — Criar abas
+- [ ] Resumo/Curva/Risco/Qualidade/Ativos já têm dado pronto
+  (`calcular_pagina1/4/5/6`) — é reorganizar `st.expander`s existentes em
+  `st.tabs`, não computar nada novo.
+- [ ] Ordens — trivial, `st.dataframe(ordens)` já bastaria; não
+  implementado ainda por não ter sido pedido, não por dificuldade
+  técnica.
+- [ ] Vapo/Robustez/Portfólio — bloqueadas pelos Épicos 7/8/10
+  respectivamente; aba ficaria vazia até lá.
+- [ ] Auditoria ("lâmina ideal.pdf" §21: clicar em um valor e chegar às
+  ordens que o compõem) — funcionalidade genuinamente nova de
+  rastreabilidade linha-a-linha, não uma composição do que já existe.
+
+### Tarefa 11.4 — Usar estado corretamente
+- [ ] `app.py` hoje já usa um esquema manual de chaves por arquivo
+  (`f"minimum_margin::{chave_arquivo}"`) — um precursor mais simples de
+  `st.session_state` estruturado, não a mesma coisa. Migrar para o padrão
+  completo (estratégia selecionada, portfólio, limiar escolhido, política
+  de vapo, cenário, filtros, análise ativa) só faz sentido pleno quando
+  existir mais de uma "análise ativa" para alternar (multi-página/
+  multi-robô), o que hoje não existe.
+
+### Tarefa 11.5 — Evitar recomputação total
+- [ ] **Sem bloqueio de nenhum outro épico** — pode ser feito a qualquer
+  momento: `@st.cache_data` nas funções de `report_data.calcular_pagina*`
+  (chave por hash do CSV + parâmetros), `@st.cache_resource` se/quando
+  houver conexão de banco (Épico 1.4). Candidato a próximo passo
+  independente se performance virar um problema real.
+
+### Tarefa 11.6 — Adicionar URLs reproduzíveis
+- [ ] **Sem bloqueio de nenhum outro épico**, ao menos parcialmente:
+  `st.query_params` já suportaria `?strategy=...&threshold=...` hoje;
+  `&scenario=...` só faz sentido quando o Épico 8 (deterioração) existir.
 
 ---
 
