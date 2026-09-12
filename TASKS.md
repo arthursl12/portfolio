@@ -290,13 +290,12 @@ Nada implementado — bloqueia partes de 4.2, 4.4, 5.5 e de todo o Épico 7
   custos configuráveis pelo usuário)
 
 ### Tarefa 6.3 — Prêmio por histórico curto
-- [ ] `history_uncertainty_multiplier(months)` com os degraus do PDF —
-  documentar explicitamente como política configurável, não "verdade
-  estatística" (o próprio PDF exige isso)
+- [x] `limiar.history_uncertainty_multiplier(months)` — os degraus exatos do
+  PDF, documentado como política configurável, não "verdade estatística"
 
 ### Tarefa 6.4 — Arredondamento
-- [ ] `recommended_threshold = ceil(raw_threshold / increment) * increment`,
-  incrementos configuráveis (R$500, R$1.000, % da margem)
+- [x] `limiar.arredondar_limiar(valor_bruto, increment, margem=None)` —
+  incremento absoluto (R$500/R$1.000) ou fração da margem
 
 ### Tarefa 6.5 — Explicar o resultado
 - [ ] Estrutura de decomposição para exibição (margem técnica / MDD P99
