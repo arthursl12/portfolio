@@ -162,9 +162,21 @@ def sharpe(serie: pd.Series, periodos_por_ano: int = DIAS_UTEIS_ANO_PADRAO) -> f
     return serie.mean() / desvio * math.sqrt(periodos_por_ano)
 
 
-def sortino(serie: pd.Series, periodos_por_ano: int = DIAS_UTEIS_ANO_PADRAO) -> float:
+def desvio_padrao(serie: pd.Series) -> float:
+    """Desvio-padrão amostral (ddof=1) -- AGENTS.md épico 4.3."""
+    return serie.std()
+
+
+def downside_deviation(serie: pd.Series) -> float:
+    """Desvio-padrão amostral (ddof=1) só dos valores negativos -- AGENTS.md
+    épico 4.3. Mesmo cálculo já usado dentro de sortino(); exposta aqui
+    como métrica nomeada própria."""
     perdas = serie[serie < 0]
-    desvio_perdas = perdas.std() if len(perdas) > 1 else math.nan
+    return perdas.std() if len(perdas) > 1 else math.nan
+
+
+def sortino(serie: pd.Series, periodos_por_ano: int = DIAS_UTEIS_ANO_PADRAO) -> float:
+    desvio_perdas = downside_deviation(serie)
     if not desvio_perdas or pd.isna(desvio_perdas):
         return math.nan
     return serie.mean() / desvio_perdas * math.sqrt(periodos_por_ano)
