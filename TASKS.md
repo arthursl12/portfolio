@@ -368,10 +368,76 @@ resolvidas pelo usuário (não inventadas): percentil da cauda é um toggle
 ## Lacunas transversais que aparecem em mais de um épico
 
 - ~~**Coluna `Ativo` nunca lida**~~ — resolvido (`daily.agregar_diario_por_ativo`
-  + `validation.extrair_raiz_ativo`); ainda falta expor em `report_data`
-  (4.1) e consumir no Épico 12 da lâmina ideal (comparação de ativos internos).
+  + `validation.extrair_raiz_ativo`); exposto em `report_data` (4.1,
+  `lucro_por_ativo`) e consumido no Épico 12 da lâmina ideal
+  (`calcular_pagina6`, ver seção "Lâmina ideal.pdf -- wiring" abaixo).
 - ~~**Coluna `Status` nunca lida**~~ — resolvido (1.1: ordens canceladas mantidas
   e excluídas da agregação; `UNKNOWN_STATUS` em 1.3).
 - **Nenhuma persistência** — Épico 1.4 é pré-requisito de fato para Épico 2
   (entidades com `AnalysisRun`/histórico) fazer sentido; hoje não há "onde"
   guardar uma `AnalysisRun`.
+
+---
+
+## Lâmina ideal.pdf — wiring em `app.py`/`report.py`
+
+Até aqui, tudo dos Épicos 0–6 existia só como função testada, sem aparecer em
+nenhuma das duas UIs (`app.py` ao vivo, `report.py` estático). Esta seção
+liga o que já existe, seguindo a estrutura do `prompts/lamina ideal.pdf`
+(27 páginas) na parte que é possível construir sem inventar convenção nova.
+A maior parte do PDF (vapo §6, Monte Carlo/bootstrap §7-8, deterioração §10,
+"mudanças de mão" §3, selo de tipo de histórico §11, score geral §19,
+portfólio §13-14, schema JSON para IA §15-18) continua **fora de escopo**
+— nenhum desses subsistemas existe no código, e cada um exigiria decidir uma
+convenção nova sem base no PDF-fonte. Ambas as UIs mostram uma nota
+"fora de escopo" explícita em vez de omitir isso em silêncio.
+
+- [x] `daily.pivotar_liquido_por_ativo(ordens)` — reshape largo de
+  `agregar_diario_por_ativo`, base para MDD/correlação por ativo
+- [x] `report_data.calcular_pagina4` — limiar (P95 e P99 lado a lado,
+  resolução do usuário "use both... toggle button somewhere"), RLT
+  (acumulado/anualizado/mensal médio-mediano/móvel 3-6-12m), risco
+  normalizado pelo limiar (MDD/L, pior dia/L, ES95/L, Ulcer/L, pior mês/L)
+  — tudo em escala TOTAL da posição (`diario['liquido']`), não por
+  contrato (decisão de escala confirmada nesta sessão)
+- [x] `report_data.calcular_pagina5` — qualidade da curva: concentração
+  (top N dias/meses), lucro removendo eventos, permanência abaixo de
+  zero, os 3 alertas automáticos de `concentracao.detectar_alertas_curva`
+- [x] `report_data.calcular_pagina6` — comparação entre ativos (só
+  chamada para robôs multi-ativo): lucro/MDD por ativo, correlação
+  (variante "todos os dias" apenas — as outras 3 do PDF §12 precisam de
+  decisões de convenção extras, documentadas como deferidas), e
+  "compensação nos piores dias" (responde à pergunta do próprio PDF:
+  "nos piores dias do WIN, quanto o WDO ganhou?")
+- [x] `metric_registry`/`versions` estendidos para páginas 4/5/6 (nova
+  etapa `concentracao` adicionada a `VERSOES` — existia desde o Épico 5
+  mas nunca tinha sido registrada)
+- [x] `report.montar_figura_curva_drawdown` ganhou `episodios=None`
+  opcional: sombreado de período submerso por faixa de duração (≤20/21-60/
+  >60 pregões), marcação de high-water marks e do melhor/pior dia —
+  compatível com versões antigas (default preserva o comportamento
+  anterior), usado por `app.py` e `report.py`
+- [x] `report.py`: `gerar_secao_pagina4/5/6` (mesmo estilo de
+  `gerar_secao_pagina2/3`); `__main__` corrigido para receber CSV/saída/
+  parâmetros de limiar via CLI (`argparse`) em vez do caminho
+  `/mnt/user-data/...` hardcoded (`CLAUDE.md`'s "I/O paths are currently
+  hardcoded")
+- [x] `app.py`: sidebar "Limiar" (margem mínima -- sem valor padrão, nunca
+  inventado; percentil/reserva/incremento com defaults editáveis),
+  expanders "Limiar e RLT", "Qualidade da curva", "Comparação entre
+  ativos" (só para CSV multi-ativo), drawdown corrente/tempo de
+  recuperação mediano finalmente exibidos (já existiam desde 4.3, nunca
+  mostrados), nota de "fora de escopo" no rodapé
+- [ ] **Limitação conhecida, não corrigida nesta rodada**: `app.py` já
+  exigia `daily.detectar_contratos_referencia` funcionar sobre o CSV
+  inteiro antes de mostrar qualquer página (`st.stop()` se falhar) —
+  pré-existente, não introduzido aqui. Isso significa que a nova
+  "Comparação entre ativos" fica, na prática, inatingível na página ao
+  vivo para `orders_roboraiz.csv` (o único CSV de exemplo multi-ativo),
+  porque esse CSV falha exatamente nessa checagem antiga (Épico 2.2:
+  WDO não tem quantidade dominante). Verificado que a função/renderização
+  em si funcionam corretamente via `report.py` (script direto) e via
+  `AppTest` do Streamlit chamando `calcular_pagina6` fora desse guard.
+  Corrigir isso exigiria decidir como `app.py` deveria se comportar sem
+  um `contratos_referencia` único (ex.: permitir entrada manual) — fora
+  do escopo pedido nesta rodada.
