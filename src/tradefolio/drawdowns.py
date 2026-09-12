@@ -13,6 +13,8 @@ Percentage metrics (maximo_drawdown_pct, ulcer_index_pct) are returned in
 percentage points (e.g. -35.36, not -0.3536), matching the fixture's own
 convention.
 """
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -29,6 +31,13 @@ def drawdown(equity: pd.Series) -> pd.Series:
 
 def maximo_drawdown(drawdown_serie: pd.Series) -> float:
     return drawdown_serie.min()
+
+
+def drawdown_corrente(drawdown_serie: pd.Series) -> float:
+    """Último valor da série de drawdown (AGENTS.md épico 4.3) -- distinto
+    de maximo_drawdown (o mínimo histórico). "Onde estou agora", não "qual
+    foi o pior momento"."""
+    return drawdown_serie.iloc[-1]
 
 
 def time_under_water_max(drawdown_serie: pd.Series) -> int:
@@ -108,3 +117,16 @@ def piores_time_under_water(equity: pd.Series, top_n: int = 10) -> pd.DataFrame:
     """Top N episódios por tempo submerso (pregões), independente da profundidade."""
     todos = calcular_episodios_drawdown(equity)
     return todos.sort_values("pregoes_submerso", ascending=False).head(top_n).reset_index(drop=True)
+
+
+def tempo_recuperacao_mediano(equity: pd.Series) -> float:
+    """Mediana de `duracao_total_pregoes` só entre episódios RECUPERADOS
+    (AGENTS.md épico 4.3 "tempo de recuperação") -- a duração de um
+    episódio ainda não recuperado é indefinida, não deve contaminar a
+    mediana como NaN nem ser tratada como zero. nan se não houver nenhum
+    episódio recuperado."""
+    episodios = calcular_episodios_drawdown(equity)
+    recuperados = episodios[episodios["recuperado"]]
+    if recuperados.empty:
+        return math.nan
+    return recuperados["duracao_total_pregoes"].median()
