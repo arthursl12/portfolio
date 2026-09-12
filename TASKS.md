@@ -377,61 +377,65 @@ resolvidas pelo usuário (não inventadas): percentil da cauda é um toggle
 
 ## Épico 7 — Motor de vapo
 
-Nada implementado. `src/tradefolio/vapo.py` (sugerido). Desbloqueado pelo
-Épico 6 (limiar já existe) para as políticas que usam o limiar como piso;
-`monthly.agregar_mensal` já dá o P&L/custo mensal que a tarefa 7.3 precisa
-como entrada. `VERSOES["vapo"]` já existe como `None` em `versions.py`
-(épico 0.3) — vira uma string de versão real quando 7.1/7.3 forem
-implementadas.
+Tarefas 7.1/7.3/7.4 implementadas em `src/tradefolio/vapo.py`. Modelo do
+motor resolvido sem precisar perguntar ao usuário: "saldo" é uma equity
+corrente (carrega de mês para mês), e "déficit anterior" é uma leitura
+derivada (`max(0, limiar - saldo_inicial)`) para exibição, já embutida em
+`saldo_antes_do_vapo` -- verificado numericamente contra
+`dados_exemplo/orders_roboraiz.csv` antes de fixar a interpretação (ver
+docstring do módulo). `VERSOES["vapo"]` = `"vapo_v1"`.
 
 ### Tarefa 7.1 — Política de piso fixo
-- [ ] `vapo = max(0, saldo_antes_do_vapo - limiar)` — mas "saldo" é
-  cumulativo desde o início ou desde a última retirada? O PDF-fonte (7.3)
-  descreve um "déficit anterior" carregado mês a mês, o que sugere que 7.1
-  não é uma função isolada e sim um caso particular do motor stateful da
-  tarefa 7.3 (piso fixo = a política mais simples desse motor). Decidir
-  isso faz parte de desenhar 7.3, não de 7.1 sozinha.
+- [x] `PoliticaPisoFixo.calcular_vapo_bruto` = `max(0, saldo_antes_do_vapo
+  - limiar)` -- a única das 7 políticas da tarefa 7.2 com fórmula literal
+  no PDF-fonte ("100% do excedente" acima do limiar/piso)
 
 ### Tarefa 7.2 — Suportar políticas alternativas
-- [ ] Sete políticas nomeadas no PDF-fonte (100% do excedente; percentual
-  do excedente; teto mensal; percentual do lucro; somente mês positivo;
-  preservação do capital inicial; reserva tributária; acumulação para
+- [x] Interface comum `PoliticaVapo` (ABC, mesmo padrão de
+  `tradefolio.importers.OrderImporter`, épico 1.2) -- `gerar_serie_vapo`
+  (7.3) compõe qualquer política sem conhecer sua fórmula interna
+- [ ] As outras 6 políticas nomeadas no PDF-fonte (percentual do
+  excedente; teto mensal; percentual do lucro; somente mês positivo;
+  preservação do capital inicial; reserva tributária/acumulação para
   aumento de mão) — cada uma precisa de uma fórmula explícita decidida
   ANTES de codificar (AGENTS.md §8): "percentual do lucro", por exemplo,
-  não diz se é lucro bruto ou líquido, mensal ou acumulado. Nenhuma
-  política deve ser adivinhada a partir do nome.
-- [ ] Interface comum sugerida (mesmo padrão de `tradefolio.importers.OrderImporter`,
-  ABC com épico 1.2 como precedente): uma `PoliticaVapo` com um método
-  `aplicar(saldo_antes_do_vapo, deficit_anterior, limiar) -> (vapo_bruto, novo_deficit)`,
-  para que 7.3 componha qualquer política sem conhecer sua fórmula interna.
+  não diz se é lucro bruto ou líquido, mensal ou acumulado. Nenhuma foi
+  implementada por não ter fórmula literal no PDF-fonte; adicionar
+  implementando `PoliticaVapo` quando essas decisões forem tomadas.
 
 ### Tarefa 7.3 — Gerar série de vapo
-- [ ] Motor mensal stateful: saldo_inicial, P&L bruto, custos, P&L líquido
-  (de `monthly.agregar_mensal`), saldo_antes_do_vapo = saldo_inicial +
-  líquido, déficit_anterior (carregado do mês anterior quando o vapo
-  ficou limitado a 0), vapo_bruto (via `PoliticaVapo` da tarefa 7.2),
-  provisão fiscal, vapo_líquido, saldo_final = saldo_antes_do_vapo -
-  vapo_líquido.
-- [ ] Provisão fiscal precisa de uma alíquota — **nunca inventar um valor
-  de imposto**; deve ser `user_input` explícito (0% é uma escolha válida,
-  não um padrão silencioso) ou o campo fica ausente/None quando não
-  informado, nunca um número assumido.
+- [x] `vapo.gerar_serie_vapo(mensal, limiar, politica, aliquota_fiscal=0.0,
+  saldo_inicial=0.0)` -- motor mensal completo (saldo_inicial, P&L bruto/
+  custos/líquido de `monthly.agregar_mensal`, saldo_antes_do_vapo,
+  déficit_anterior, vapo_bruto via `PoliticaVapo`, provisão fiscal,
+  vapo_líquido, saldo_final). `saldo_final` desconta o vapo BRUTO, não o
+  líquido (a provisão fiscal sai da conta de trading, só o valor
+  distribuível ao dono é menor). Escala TOTAL da posição (mesma decisão
+  já resolvida para limiar/RLT). Verificado contra `orders_roboraiz.csv`
+  com limiar=R$13.500: 44 meses, primeiro vapo só em 2026-03 (R$388,50),
+  total de vapo bruto no período R$4.452,00 em 5 meses
+- [x] Alíquota fiscal (`aliquota_fiscal`) tem default `0.0` explícito —
+  nunca um imposto inventado; 0% é a escolha padrão honesta, não um
+  placeholder
 
 ### Tarefa 7.4 — Criar métricas do vapo
-- [ ] VLT (vapo sobre o limiar) é literalmente `limiar.normalizar_por_limiar(vapo, limiar_ativo)`
-  — já existe, reuso direto, mesmo padrão de RLT (AGENTS.md §8.1). VLT
-  acumulado/mensal/médio/mediano espelham `rlt_acumulado`/`rlt_mensal`/etc.
-  estruturalmente — quando a série de vapo (7.3) existir, essas quatro
-  métricas são praticamente gratuitas.
-- [ ] Frequência de meses com vapo, maior vapo, meses consecutivos sem
-  vapo — mesma lógica de sequência já usada em
-  `metrics.maior_sequencia`/`maior_sequencia_detalhada`, reuso de padrão.
-- [ ] "Meses positivos sem vapo por causa de drawdown anterior" (também
-  citado na "lâmina ideal.pdf" §6) — precisa cruzar mês positivo (já
-  calculável) com déficit_anterior > 0 (vem de 7.3); não é uma métrica
-  isolada, depende do motor stateful existir primeiro.
-- [ ] Déficit atual em relação ao limiar — `saldo_final` (de 7.3) vs.
-  limiar, mesma normalização de 4.4.
+- [x] `vlt_acumulado`/`vlt_mensal` — reuso direto de
+  `limiar.rlt_acumulado`/`rlt_mensal` (mesma fórmula genérica valor/
+  limiar, AGENTS.md §8.1), sem nenhuma fórmula nova
+- [x] `frequencia_meses_com_vapo` — reuso de `metrics.taxa_positivos`
+- [x] `maior_vapo` — `.max()` direto
+- [x] `maior_sequencia_sem_vapo` — precisou de uma extração pequena:
+  `metrics.maior_sequencia` só cobria `>0`/`<0`, não `==0` (vapo nunca é
+  negativo, "sem vapo" é exatamente zero); extraído
+  `metrics.maior_sequencia_mascara(mascara)` como o núcleo genérico
+  (AGENTS.md §8.1), com `maior_sequencia` refatorado para chamá-lo —
+  refactor comportamento-preservado, suite completa ainda verde
+- [x] `meses_positivos_sem_vapo_por_deficit` — cruza `pnl_liquido > 0`
+  com `vapo_bruto == 0` na série de 7.3 (o "um mês positivo não significa
+  necessariamente dinheiro distribuível" da "lâmina ideal.pdf" §6);
+  verificado: 28 dos 44 meses do Robô Raiz
+- [x] `deficit_atual` — `max(0, limiar - saldo_final.iloc[-1])`, mesma
+  normalização de 4.4
 
 ### Tarefa 7.5 — Criar calendário visual
 - [ ] Camada de apresentação (app.py/report.py), bloqueada por 7.3/7.4
