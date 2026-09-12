@@ -273,21 +273,35 @@ cálculo existem e estão testadas, mesmo padrão de 3.1/4.1).
 
 ## Épico 6 — Motor de limiar
 
-Nada implementado — bloqueia partes de 4.2, 4.4, 5.5 e de todo o Épico 7
-(vapo) adiante. Sugestão: `src/tradefolio/limiar.py`.
+Completo dentro do que o usuário decidiu. Duas ambiguidades do PDF foram
+resolvidas pelo usuário (não inventadas): percentil da cauda é um toggle
+(P95 **e** P99 suportados, não um só hardcoded) e reserva operacional é
+`% de minimum_margin` (não um valor fixo em R$). `src/tradefolio/limiar.py`.
 
 ### Tarefa 6.1 — Decomposição do limiar
-- [ ] `limiar = margem_minima + reserva_drawdown_cauda + premio_incerteza + reserva_operacional`
-- [ ] Decisão prévia obrigatória (AGENTS.md §8/§24): fonte de cada termo —
-  P95/P99 de qual série, deteriorado ou não, arredondamento — antes de
-  codificar (não adivinhar a fórmula concreta a partir do esqueleto do PDF)
+- [x] `limiar.decompor_limiar(minimum_margin, drawdown_serie, meses_historico,
+  percentil_cauda=95|99, fracao_reserva_operacional, increment=None)` —
+  `limiar_bruto = minimum_margin + tail_drawdown_reserve + operational_reserve`,
+  onde `tail_drawdown_reserve` já embute o prêmio por histórico curto
+  (`uncertainty_premium` é exposto separado = a parte que o multiplicador
+  soma acima do valor bruto do percentil). Verificado contra
+  `orders_roboraiz.csv` real: P95=-1247,50 / P99=-1550,97 por contrato,
+  42,8 meses de histórico → multiplicador 1.0 (sem prêmio)
+- [x] `drawdown_serie` é recebida pronta (não recalculada aqui) — a decisão
+  de qual série "deteriorada" ou não usar fica com o chamador; o motor de
+  deterioração (Épico 8) não existe ainda, então só a série não-deteriorada
+  está disponível hoje
 
 ### Tarefa 6.2 — Perfis de limiar
-- [ ] Técnico (só margem mínima)
-- [ ] Histórico (margem + MDD P95 histórico)
-- [ ] Prudente (margem + MDD P99 deteriorado + arredondamento)
-- [ ] Personalizado (percentil/horizonte/deterioração/reserva/arredondamento/
-  custos configuráveis pelo usuário)
+- [~] Não implementado como funções próprias — decisão deliberada (nenhuma
+  abstração além do necessário): um "perfil" é só uma escolha fixa de
+  `percentil_cauda`/`fracao_reserva_operacional` passada a `decompor_limiar`.
+  Técnico ≈ `fracao_reserva_operacional=0`; Histórico ≈ `percentil_cauda=95`;
+  Prudente ≈ `percentil_cauda=99` (+ série deteriorada quando o Épico 8
+  existir); Personalizado ≈ os parâmetros livres já expostos. Quem montar o
+  seletor de perfil na camada de relatório/UI mapeia nome → esses parâmetros
+- [ ] Perfil "Prudente" com MDD deteriorado — bloqueado pelo Épico 8
+  (deterioração), que não existe
 
 ### Tarefa 6.3 — Prêmio por histórico curto
 - [x] `limiar.history_uncertainty_multiplier(months)` — os degraus exatos do
@@ -298,9 +312,11 @@ Nada implementado — bloqueia partes de 4.2, 4.4, 5.5 e de todo o Épico 7
   incremento absoluto (R$500/R$1.000) ou fração da margem
 
 ### Tarefa 6.5 — Explicar o resultado
-- [ ] Estrutura de decomposição para exibição (margem técnica / MDD P99
-  deteriorado / reserva operacional / total) — camada de apresentação, só
-  depois que 6.1–6.4 existirem
+- [x] `decompor_limiar` já retorna cada termo separado (minimum_margin,
+  tail_drawdown_reserve, uncertainty_premium, uncertainty_multiplier,
+  operational_reserve, limiar_bruto, limiar_recomendado se `increment`
+  informado) — satisfaz "mostrar a decomposição, não só o número final"
+  sem precisar de uma estrutura de exibição separada
 
 ---
 
