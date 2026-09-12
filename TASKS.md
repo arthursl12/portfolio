@@ -61,14 +61,23 @@ existing implementation or the natural place to add new code.
   como pendente por engano numa rodada anterior desta mesma tarefa
 
 ### Tarefa 1.2 — Perfis de importação
-- [ ] Interface comum `OrderImporter` (`can_parse`/`parse`/`diagnostics`) —
-  não existe; hoje `carregar_ordens` é uma função única específica da
-  SmarttBot
-- [ ] Importador genérico de CSV
-- [ ] Importador de formato manual padronizado
-- [ ] Critério de aceite: reimportar o mesmo arquivo não duplica ordens
-  (depende de um identificador estável — `#` já serve para isso dentro de um
-  arquivo, mas não há noção de "já importado antes" entre execuções)
+- [x] Interface comum `OrderImporter` (`can_parse`/`parse`/`diagnostics`) —
+  `src/tradefolio/importers.py`, ABC (não Protocol -- `abstractmethod`
+  garante em tempo de instanciação que uma subclasse implementa os três
+  métodos). `SmarttbotOrderImporter` envolve `loaders.carregar_ordens` +
+  `validation.diagnostico_ingestao` sem duplicar lógica; `can_parse` só lê
+  o cabeçalho (reusa `loaders.ler_primeira_linha`, extraída de
+  `detectar_delimitador` para não duplicar) e checa
+  `COLUNAS_OBRIGATORIAS`, sem parsear o arquivo inteiro
+- [ ] Importador genérico de CSV — não implementado: nenhum formato
+  concreto foi especificado (AGENTS.md §8: não inventar um formato para
+  preencher a tarefa)
+- [ ] Importador de formato manual padronizado — mesmo motivo
+- [ ] Critério de aceite: reimportar o mesmo arquivo não duplica ordens —
+  bloqueado pelo Épico 1.4 (precisa de um "já importado antes" durável
+  entre execuções, que é justamente a persistência ainda sem decisão de
+  tecnologia); `#` já resolve duplicata DENTRO de um arquivo
+  (`DUPLICATE_ORDER`), não entre execuções separadas
 
 ### Tarefa 1.3 — Diagnóstico de ingestão
 - [x] Todos os 8 códigos determinísticos do PDF: `INVALID_DATE`,

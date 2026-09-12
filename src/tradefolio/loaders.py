@@ -41,21 +41,27 @@ def parse_valor_br(s: pd.Series) -> pd.Series:
     return numerico
 
 
-def detectar_delimitador(csv_path) -> str:
-    """Distingue ';' de ',' pela linha de cabeçalho (AGENTS.md épico 1,
-    tarefa 1.1). Convenção observada é sempre ';' -- usado como fallback se
-    a detecção for inconclusiva (nenhum candidato presente na linha)."""
-    candidatos = (";", ",")
+def ler_primeira_linha(csv_path) -> str:
+    """Lê só a linha de cabeçalho, sem carregar o arquivo inteiro --
+    compartilhada por detectar_delimitador e
+    tradefolio.importers.SmarttbotOrderImporter.can_parse."""
     if hasattr(csv_path, "read"):
         posicao = csv_path.tell()
         primeira_linha = csv_path.readline()
         csv_path.seek(posicao)
         if isinstance(primeira_linha, bytes):
             primeira_linha = primeira_linha.decode("utf-8-sig")
-    else:
-        with open(csv_path, "r", encoding="utf-8-sig") as f:
-            primeira_linha = f.readline()
+        return primeira_linha
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        return f.readline()
 
+
+def detectar_delimitador(csv_path) -> str:
+    """Distingue ';' de ',' pela linha de cabeçalho (AGENTS.md épico 1,
+    tarefa 1.1). Convenção observada é sempre ';' -- usado como fallback se
+    a detecção for inconclusiva (nenhum candidato presente na linha)."""
+    candidatos = (";", ",")
+    primeira_linha = ler_primeira_linha(csv_path)
     contagens = {c: primeira_linha.count(c) for c in candidatos}
     delimitador = max(contagens, key=contagens.get)
     return delimitador if contagens[delimitador] > 0 else ";"
