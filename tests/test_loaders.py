@@ -27,6 +27,24 @@ def test_parse_valor_br_converte_decimal_e_milhar():
     assert pd.isna(resultado.iloc[3])
 
 
+def test_parse_valor_br_rejeita_valor_nao_interpretavel():
+    # AGENTS.md épico 1, tarefa 1.3 (INVALID_MONETARY_VALUE): distingue um
+    # "-" legítimo (sem resultado) de uma string realmente corrompida --
+    # ambos viravam NaN silenciosamente antes desta checagem.
+    serie = pd.Series(["1.234,56", "R$ abc", "-"])
+    with pytest.raises(ValueError, match="abc"):
+        parse_valor_br(serie)
+
+
+def test_codigo_diagnostico_valor_monetario_invalido():
+    from tradefolio.validation import ErroValidacao
+
+    serie = pd.Series(["1.234,56", "R$ abc", "-"])
+    with pytest.raises(ErroValidacao) as exc_info:
+        parse_valor_br(serie)
+    assert exc_info.value.codigo == "INVALID_MONETARY_VALUE"
+
+
 def test_carregar_ordens_le_fixture_mini_com_sucesso():
     ordens = carregar_ordens(FIXTURE_MINI)
     assert len(ordens) == 10
