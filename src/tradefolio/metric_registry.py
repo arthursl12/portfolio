@@ -229,6 +229,13 @@ _ENTRADAS = [
        "calculated", "metricas", _CAMPOS_DIARIO,
        "Lucro total gerado por unidade de Maximum Drawdown sofrido.",
        "NaN se max_drawdown for 0; não anualizado (ao contrário de Calmar)."),
+    _m("lucro_por_ativo", "Lucro líquido por ativo", 1,
+       "groupby(ativo_raiz).liquido.sum() -- AGENTS.md épico 3.1/4.1, tradefolio.daily.agregar_diario_por_ativo",
+       "acumulada no período", "R$ (escala bruta, não por contrato)", "calculated",
+       "agregacao_diaria", ("Data/Hora", "Ativo", "Status", "Tipo", "Quantidade executada", "Resultado (R$)"),
+       "Quebra do lucro líquido total por raiz de ativo (ex. WIN vs. WDO num robô multi-ativo) -- só aparece quando `ordens` é passado a calcular_pagina1.",
+       "escala bruta, não normalizada por contrato: um robô multi-ativo pode não ter uma única referência de contratos estável por ativo (ver tarefa 2.2/TASKS.md, caso real do WDO no Robô Raiz) -- dividir por contratos_referencia aqui misturaria escalas diferentes.",
+       tratamento_dado_ausente="um (ativo) sem nenhuma ordem no período simplesmente não aparece no dict -- não é preenchido com zero (diferente do nível diário agregado, onde uma sessão sem ordem existe no calendário)."),
 
     # -- página 2: trades (tradefolio.report_data.calcular_pagina2) --
     _m("n_trades", "Número de trades", 2,

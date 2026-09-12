@@ -189,13 +189,15 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
   `taxa_positivos`) já funcionam sobre ela (AGENTS.md §8.1) — verificado
   contra `tests/fixtures/romanos_orders.csv` (16 meses). Ainda não ligado a
   `report_data`/registro de métricas
-- [ ] Lucro **por ativo** — dado-base pronto desde 3.1
-  (`daily.agregar_diario_por_ativo`), falta expor como métrica nomeada em
-  `calcular_pagina1/2/3` (ex. `agregar_diario_por_ativo(...).groupby("ativo_raiz")["liquido"].sum()`).
-  Não feito nesta rodada porque exigiria mudar a assinatura de
-  `calcular_pagina1` (hoje só recebe `diario`, não `ordens`) — afeta
-  `app.py` e vários testes; consumidor natural é o Épico 12 da lâmina
-  ideal, deixado para lá em vez de forçar agora
+- [x] Lucro **por ativo** — `calcular_pagina1(diario, ordens=...)` (parâmetro
+  `ordens` opcional, `None` por padrão — não quebra `app.py` nem os testes
+  existentes que só passam `diario`) agora inclui `"lucro_por_ativo"`
+  (`{"WIN": ..., "WDO": ...}`, escala bruta, não por contrato — ver nota na
+  entrada do `metric_registry`). Verificado contra `orders_roboraiz.csv`
+  real: WDO=2.303,50 / WIN=15.648,50. Consumo na UI (`app.py`) não foi
+  feito — mexer na camada Streamlit está fora deste passo (AGENTS.md/
+  CLAUDE.md: não tocar `app.py` para implementar cálculo core sem pedido
+  explícito); o dado já está disponível para quando isso for pedido
 - [x] Lucro **por dia operado** — `report_data.calcular_pagina1`'s
   `media_diaria_dias_operados` (`serie[diario["operou"]].mean()`), com
   entrada no `metric_registry`. Verificado contra o mini-fixture: média

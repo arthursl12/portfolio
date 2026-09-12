@@ -6,7 +6,12 @@ import pandas as pd
 
 from tradefolio import drawdowns, metrics
 from tradefolio.alignment import preencher_calendario_b3
-from tradefolio.daily import CONTRATOS_REFERENCIA_PADRAO, agregar_diario, detectar_contratos_referencia
+from tradefolio.daily import (
+    CONTRATOS_REFERENCIA_PADRAO,
+    agregar_diario,
+    agregar_diario_por_ativo,
+    detectar_contratos_referencia,
+)
 from tradefolio.drawdowns import CAPITAL_POR_CONTRATO_PADRAO
 from tradefolio.loaders import carregar_ordens
 from tradefolio.trades import reconstruir_trades
@@ -57,7 +62,9 @@ def montar_dataframe_diario(csv_path, contratos_referencia: int = None) -> pd.Da
 
 
 def calcular_pagina1(
-    diario: pd.DataFrame, contratos_referencia: int = CONTRATOS_REFERENCIA_PADRAO
+    diario: pd.DataFrame,
+    contratos_referencia: int = CONTRATOS_REFERENCIA_PADRAO,
+    ordens: pd.DataFrame = None,
 ) -> tuple[dict, pd.Series, pd.Series]:
     serie = diario["liquido_por_contrato"]
 
@@ -98,6 +105,14 @@ def calcular_pagina1(
         "calmar": metrics.calmar(serie, max_dd),
         "recovery_factor": metrics.recovery_factor(serie, max_dd),
     }
+    if ordens is not None:
+        # Escala bruta (não normalizada por contrato): um robô multi-ativo
+        # pode não ter uma única referência de contratos estável por ativo
+        # (ver tarefa 2.2/TASKS.md -- WDO do Robô Raiz é um caso real disso),
+        # então dividir por contratos_referencia aqui misturaria escalas.
+        m["lucro_por_ativo"] = (
+            agregar_diario_por_ativo(ordens).groupby("ativo_raiz")["liquido"].sum().to_dict()
+        )
     return m, equity, dd
 
 
