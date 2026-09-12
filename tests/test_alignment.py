@@ -51,3 +51,21 @@ def test_nao_estende_calendario_alem_dos_dados():
     resultado = preencher_calendario_b3(_diario_sem_07_01())
     assert resultado.index.min() == pd.Timestamp("2025-01-02")
     assert resultado.index.max() == pd.Timestamp("2025-01-08")
+
+
+def test_resultado_zero_distingue_dia_operado_flat_de_dia_sem_ordem():
+    # AGENTS.md §10/§14: NO_TRADE (sem ordem) e ZERO_RESULT (operou e
+    # terminou zerado) são dois "tipos de zero" diferentes -- 07/01 é
+    # NO_TRADE (operou=False), 08/01 é ZERO_RESULT (operou=True, bruto=0.00
+    # na fixture). resultado_zero só é True no segundo caso.
+    resultado = preencher_calendario_b3(_diario_sem_07_01())
+
+    assert resultado.loc["2025-01-07", "operou"] == False
+    assert resultado.loc["2025-01-07", "resultado_zero"] == False
+
+    assert resultado.loc["2025-01-08", "operou"] == True
+    assert resultado.loc["2025-01-08", "resultado_zero"] == True
+
+    for data in ["2025-01-02", "2025-01-03", "2025-01-06"]:
+        assert resultado.loc[data, "operou"] == True
+        assert resultado.loc[data, "resultado_zero"] == False
