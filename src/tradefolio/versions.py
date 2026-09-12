@@ -21,6 +21,7 @@ VERSOES = {
     "metricas": "metrics_v1",
     "drawdowns": "drawdowns_v1",
     "limiar": "limiar_v1",  # decompor_limiar (P95/P99 toggle, reserva = % da margem) + rlt_*/normalizar_por_limiar
+    "concentracao": "concentracao_v1",  # participacao_top_n, resultado_sem_top_n, detectar_alertas_curva, etc.
     # não implementadas ainda -- ver roadmap (Épicos 6-10 da lâmina ideal)
     "vapo": None,
     "monte_carlo": None,

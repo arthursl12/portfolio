@@ -10,6 +10,7 @@ de dado ausente/tratamento de custos/interpretação/limitações -- é isso
 que torna "nenhuma métrica pode existir apenas no componente visual" (tarefa
 0.1) um invariante testado, não uma promessa em prosa.
 """
+import warnings
 from pathlib import Path
 
 import pytest
@@ -20,14 +21,26 @@ from tradefolio.report_data import (
     calcular_pagina1,
     calcular_pagina2,
     calcular_pagina3,
+    calcular_pagina4,
+    calcular_pagina5,
+    calcular_pagina6,
     montar_dataframe_diario,
 )
 from tradefolio.versions import VERSOES
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mini_fixture_orders.csv"
+# mini_fixture só tem 5 pregões -- curto demais para decompor_limiar (< 6
+# meses de histórico -> multiplicador inf, por desenho de
+# history_uncertainty_multiplier). Páginas 4/5/6 usam fixtures reais mais
+# longas já verificadas nesta sessão.
+FIXTURE_LONGA = Path(__file__).parent / "fixtures" / "romanos_orders.csv"
+FIXTURE_MULTI_ATIVO = "dados_exemplo/orders_roboraiz.csv"
 
 ARTEFATOS_ESPERADOS = frozenset(
-    {"trades", "episodios_drawdown", "piores_tuw", "serie", "piores_5", "melhores_5"}
+    {
+        "trades", "episodios_drawdown", "piores_tuw", "serie", "piores_5", "melhores_5",
+        "correlacao_ativos", "compensacao_piores_dias",
+    }
 )
 
 
@@ -39,6 +52,20 @@ def diario():
 @pytest.fixture
 def ordens():
     return carregar_ordens(FIXTURE)
+
+
+@pytest.fixture
+def diario_longo():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return montar_dataframe_diario(FIXTURE_LONGA, contratos_referencia=1)
+
+
+@pytest.fixture
+def ordens_multi_ativo():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return carregar_ordens(FIXTURE_MULTI_ATIVO)
 
 
 def test_artefatos_excluidos_sao_exatamente_os_documentados():
@@ -63,11 +90,29 @@ def test_toda_chave_de_pagina3_tem_entrada_no_registro_ou_e_artefato_documentado
     assert faltando == []
 
 
+def test_toda_chave_de_pagina4_tem_entrada_no_registro_ou_e_artefato_documentado(diario_longo):
+    p4 = calcular_pagina4(diario_longo, minimum_margin=1000)
+    faltando = [k for k in p4 if k not in REGISTRO and k not in ARTEFATOS_DE_DADOS_EXCLUIDOS]
+    assert faltando == []
+
+
+def test_toda_chave_de_pagina5_tem_entrada_no_registro_ou_e_artefato_documentado(diario_longo):
+    p5 = calcular_pagina5(diario_longo)
+    faltando = [k for k in p5 if k not in REGISTRO and k not in ARTEFATOS_DE_DADOS_EXCLUIDOS]
+    assert faltando == []
+
+
+def test_toda_chave_de_pagina6_tem_entrada_no_registro_ou_e_artefato_documentado(ordens_multi_ativo):
+    p6 = calcular_pagina6(ordens_multi_ativo)
+    faltando = [k for k in p6 if k not in REGISTRO and k not in ARTEFATOS_DE_DADOS_EXCLUIDOS]
+    assert faltando == []
+
+
 def test_cada_entrada_do_registro_tem_todos_os_campos_preenchidos():
     for metric_id, spec in REGISTRO.items():
         assert spec.id == metric_id
         assert spec.nome
-        assert spec.pagina in (1, 2, 3)
+        assert spec.pagina in (1, 2, 3, 4, 5, 6)
         assert spec.formula
         assert spec.frequencia
         assert spec.unidade

@@ -4,16 +4,18 @@ here (AGENTS.md §16: keep business logic separate from presentation).
 """
 import pandas as pd
 
-from tradefolio import drawdowns, metrics
+from tradefolio import concentracao, drawdowns, limiar, metrics
 from tradefolio.alignment import preencher_calendario_b3
 from tradefolio.daily import (
     CONTRATOS_REFERENCIA_PADRAO,
     agregar_diario,
     agregar_diario_por_ativo,
     detectar_contratos_referencia,
+    pivotar_liquido_por_ativo,
 )
 from tradefolio.drawdowns import CAPITAL_POR_CONTRATO_PADRAO
 from tradefolio.loaders import carregar_ordens
+from tradefolio.monthly import agregar_mensal
 from tradefolio.trades import reconstruir_trades
 
 PERCENTIS_PAGINA3 = (1, 5, 10, 25, 50, 75, 90, 95, 99)
@@ -144,6 +146,129 @@ def calcular_pagina2(diario: pd.DataFrame, ordens: pd.DataFrame) -> dict:
         ),
         "episodios_drawdown": drawdowns.episodios_drawdown(equity, top_n=10),
         "piores_tuw": drawdowns.piores_time_under_water(equity, top_n=10),
+    }
+
+
+def calcular_pagina4(
+    diario: pd.DataFrame,
+    minimum_margin: float,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = 500,
+) -> dict:
+    """Limiar, RLT e risco normalizado pelo limiar (lâmina ideal.pdf
+    §4/5/7). Escala TOTAL (`diario['liquido']`), não por contrato --
+    `minimum_margin` é da posição total (decisão confirmada com o
+    usuário nesta sessão, ver tradefolio.limiar). `limiar_p95`/`limiar_p99`
+    são sempre os DOIS calculados (resolução do usuário: "use both...
+    toggle button somewhere"); `percentil_cauda` só escolhe qual alimenta
+    o resto da página (`limiar_ativo`, RLT, normalizações de risco)."""
+    serie = diario["liquido"]
+    equity = drawdowns.curva_equity(serie)
+    dd = drawdowns.drawdown(equity)
+    mdd = drawdowns.maximo_drawdown(dd)
+    pior_dia = serie.min()
+    es95 = metrics.expected_shortfall(serie, 0.95)
+    ulcer = drawdowns.ulcer_index(dd)
+    mensal = agregar_mensal(diario)
+    pior_mes = mensal["liquido"].min()
+    meses_historico = (serie.index.max() - serie.index.min()).days / 30.44
+
+    limiar_p95 = limiar.decompor_limiar(
+        minimum_margin, dd, meses_historico, 95, fracao_reserva_operacional, increment
+    )
+    limiar_p99 = limiar.decompor_limiar(
+        minimum_margin, dd, meses_historico, 99, fracao_reserva_operacional, increment
+    )
+    limiar_escolhido = limiar_p95 if percentil_cauda == 95 else limiar_p99
+    limiar_ativo = limiar_escolhido.get("limiar_recomendado", limiar_escolhido["limiar_bruto"])
+
+    liquido_mensal = mensal["liquido"]
+    rlt_mensal_serie = limiar.rlt_mensal(liquido_mensal, limiar_ativo)
+
+    return {
+        "meses_historico": meses_historico,
+        "limiar_p95": limiar_p95,
+        "limiar_p99": limiar_p99,
+        "percentil_cauda_ativo": percentil_cauda,
+        "limiar_ativo": limiar_ativo,
+        "rlt_acumulado": limiar.rlt_acumulado(serie.sum(), limiar_ativo),
+        "rlt_anualizado": limiar.rlt_anualizado(serie, limiar_ativo),
+        "rlt_mensal_medio": rlt_mensal_serie.mean(),
+        "rlt_mensal_mediano": rlt_mensal_serie.median(),
+        "rlt_movel_3": limiar.rlt_movel(liquido_mensal, limiar_ativo, 3).iloc[-1],
+        "rlt_movel_6": limiar.rlt_movel(liquido_mensal, limiar_ativo, 6).iloc[-1],
+        "rlt_movel_12": limiar.rlt_movel(liquido_mensal, limiar_ativo, 12).iloc[-1],
+        "mdd_total": mdd,
+        "mdd_sobre_limiar": limiar.normalizar_por_limiar(mdd, limiar_ativo),
+        "pior_dia_total": pior_dia,
+        "pior_dia_sobre_limiar": limiar.normalizar_por_limiar(pior_dia, limiar_ativo),
+        "es95_total": es95,
+        "es95_sobre_limiar": limiar.normalizar_por_limiar(es95, limiar_ativo),
+        "ulcer_total": ulcer,
+        "ulcer_sobre_limiar": limiar.normalizar_por_limiar(ulcer, limiar_ativo),
+        "pior_mes_total": pior_mes,
+        "pior_mes_sobre_limiar": limiar.normalizar_por_limiar(pior_mes, limiar_ativo),
+    }
+
+
+def calcular_pagina5(diario: pd.DataFrame, dias_recentes: int = 60) -> dict:
+    """Qualidade da curva (lâmina ideal.pdf §9) -- só compõe
+    tradefolio.concentracao (AGENTS.md épico 5, já implementado). Escala
+    TOTAL (`diario['liquido']`), mesma decisão de calcular_pagina4."""
+    serie = diario["liquido"]
+    equity = drawdowns.curva_equity(serie)
+    mensal = agregar_mensal(diario)["liquido"]
+
+    return {
+        "top1_dia": concentracao.participacao_top_n(serie, 1),
+        "top5_dias": concentracao.participacao_top_n(serie, 5),
+        "top10_dias": concentracao.participacao_top_n(serie, 10),
+        "melhor_mes_share": concentracao.participacao_top_n(mensal, 1),
+        "top3_meses_share": concentracao.participacao_top_n(mensal, 3),
+        "lucro_sem_melhor_dia": concentracao.resultado_sem_top_n(serie, 1),
+        "lucro_sem_top5_dias": concentracao.resultado_sem_top_n(serie, 5),
+        "lucro_sem_melhor_mes": concentracao.resultado_sem_top_n(mensal, 1),
+        "lucro_sem_top3_meses": concentracao.resultado_sem_top_n(mensal, 3),
+        "lucro_antes_dos_ultimos_60_dias": concentracao.resultado_antes_dos_ultimos_n_dias(
+            serie, dias_recentes
+        ),
+        "pct_dias_abaixo_de_zero": concentracao.pct_dias_abaixo_de_zero(equity),
+        "ultima_data_negativa": concentracao.ultima_data_negativa(equity),
+        "pregoes_desde_consolidacao_positiva": concentracao.pregoes_desde_consolidacao_positiva(equity),
+        "alertas": concentracao.detectar_alertas_curva(serie, mensal, dias_recentes),
+    }
+
+
+def calcular_pagina6(ordens: pd.DataFrame, n_piores_dias: int = 5) -> dict:
+    """Comparação entre ativos internos (lâmina ideal.pdf §12) -- só faz
+    sentido para robôs multi-ativo; quem chama decide SE chama (checar
+    nunique(ativo_raiz) > 1 antes), esta função não guarda essa lógica.
+    Reusa tradefolio.daily.pivotar_liquido_por_ativo + drawdowns/correlação
+    já existentes, nenhuma fórmula nova. "compensacao_piores_dias" responde
+    à pergunta do próprio PDF ("Nos piores dias do WIN, quanto o WDO
+    ganhou?"): para os N piores dias de CADA ativo, o resultado dos
+    demais ativos nas mesmas datas."""
+    largo = pivotar_liquido_por_ativo(ordens)
+
+    mdd_por_ativo = {}
+    for col in largo.columns:
+        equity = drawdowns.curva_equity(largo[col])
+        dd = drawdowns.drawdown(equity)
+        mdd_por_ativo[col] = drawdowns.maximo_drawdown(dd)
+
+    compensacao_piores_dias = {}
+    for col in largo.columns:
+        piores = largo[col].nsmallest(n_piores_dias)
+        tabela = largo.loc[piores.index].reset_index()
+        compensacao_piores_dias[col] = tabela
+
+    return {
+        "ativos": list(largo.columns),
+        "lucro_por_ativo": largo.sum().to_dict(),
+        "mdd_por_ativo": mdd_por_ativo,
+        "correlacao_ativos": largo.corr(),
+        "compensacao_piores_dias": compensacao_piores_dias,
     }
 
 

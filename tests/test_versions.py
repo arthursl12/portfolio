@@ -22,6 +22,7 @@ ETAPAS_IMPLEMENTADAS = (
     "metricas",
     "drawdowns",
     "limiar",
+    "concentracao",
 )
 
 ETAPAS_NAO_IMPLEMENTADAS = (
