@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 from tradefolio.alignment import preencher_calendario_b3
+from tradefolio.custo_mensal import FaixaCustoMensal, TabelaCustoMensal, aplicar_custo_mensal
 from tradefolio.daily import agregar_diario, detectar_contratos_referencia
 from tradefolio.drawdowns import episodios_drawdown
 from tradefolio.metric_registry import REGISTRO
@@ -501,6 +502,12 @@ def _parse_argumentos():
     parser.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
     parser.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
     parser.add_argument("--increment", type=float, default=500.0)
+    parser.add_argument(
+        "--custo-mensal", type=float, default=0.0,
+        help="Custo mensal de plataforma (R$), mesmo valor para qualquer número de "
+             "contratos -- para uma tabela em degraus por faixa de contratos, use a "
+             "página ao vivo (app.py), que tem um editor de faixas. Padrão 0 (sem custo).",
+    )
     parser.add_argument("--robo", default=None, help="Nome do robô no título (padrão: nome do arquivo)")
     return parser.parse_args()
 
@@ -512,6 +519,8 @@ if __name__ == "__main__":
     ordens = carregar_ordens(args.csv_path)
     contratos_referencia = detectar_contratos_referencia(ordens)
     diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+    tabela_custo_mensal = TabelaCustoMensal(faixas=(FaixaCustoMensal(1, None, args.custo_mensal),))
+    diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)
 
     metricas, equity, drawdown = calcular_metricas_pagina1(diario, contratos_referencia=contratos_referencia)
     episodios = episodios_drawdown(equity, top_n=len(equity))

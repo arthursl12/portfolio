@@ -847,9 +847,24 @@ existia o emolumento B3 por perna, linear e por ordem —
   custo automaticamente, sem precisar mudar nenhum outro módulo —
   verificado por script: lucro líquido, Sharpe, MDD e a reagregação
   mensal mudam corretamente contra `tests/fixtures/romanos_orders.csv`
-- [ ] **Não wireado em `app.py`/`report.py` nesta rodada** — o pedido foi
-  sobre a lógica de cálculo ("deve ser contabilizado no lucro líquido e
-  em seus indicadores derivados"), já satisfeito e verificado
-  ponta-a-ponta a nível de biblioteca. Adicionar um input de UI (ex.
-  `st.data_editor` para a tabela de faixas) é a extensão natural, mas é
-  uma decisão de interface separada, não pedida ainda.
+- [x] **Wireado em `app.py`**: sidebar "Custo mensal" com `st.data_editor`
+  editável (linhas dinâmicas: min/máx contratos, custo mensal) — cobre
+  tanto o caso tiered quanto "mesmo valor para todas as faixas"/"zero"
+  pedidos pelo usuário. `construir_tabela_custo_mensal` converte a
+  tabela editada, ignorando linhas totalmente vazias (usuário ainda
+  digitando) e propagando erro de validação (faixas sobrepostas) via
+  `st.error` + `st.stop()`, mesmo padrão das outras validações da
+  sidebar. Aplicado sobre `contratos_referencia` REAL detectado, não
+  sobre o "Número de contratos" simulado — mesma limitação de escala
+  linear já documentada para a simulação de contratos (custo mensal em
+  degraus não escala linearmente, então compor com a simulação
+  hipotética herdaria essa imprecisão de qualquer forma). Caption no
+  topo mostra a faixa ativa e o custo total já debitado no período.
+- [x] **Wireado em `report.py`** (CLI): `--custo-mensal FLOAT` (padrão
+  0.0) — só um valor único (mesmo custo para qualquer número de
+  contratos), já que uma tabela em degraus completa via flags de linha
+  de comando seria pouco prática; a tabela editável fica em `app.py`,
+  mais adequada para isso.
+- Ambas verificadas ponta-a-ponta por script e via `AppTest` do
+  Streamlit (sem exceções, lucro líquido/Sharpe/MDD mudam corretamente
+  quando um custo não-zero é aplicado).

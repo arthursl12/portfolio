@@ -12,10 +12,12 @@ não têm esse problema -- cada dia é agregado independentemente.
 """
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from report import fmt, montar_figura_curva_drawdown, montar_figura_distribuicao
 from tradefolio.alignment import preencher_calendario_b3
+from tradefolio.custo_mensal import FaixaCustoMensal, TabelaCustoMensal, aplicar_custo_mensal
 from tradefolio.daily import agregar_diario, detectar_contratos_referencia, escalar_por_contratos
 from tradefolio.drawdowns import drawdown_corrente, episodios_drawdown, tempo_recuperacao_mediano
 from tradefolio.loaders import carregar_ordens
@@ -60,6 +62,27 @@ def escalar_metricas_absolutas(metricas: dict, n_contratos: float) -> dict:
     return escaladas
 
 
+def construir_tabela_custo_mensal(df_editado: pd.DataFrame) -> TabelaCustoMensal:
+    """Converte a tabela editável (st.data_editor) numa
+    tradefolio.custo_mensal.TabelaCustoMensal. Linhas totalmente vazias
+    (o usuário ainda digitando uma nova linha) são ignoradas em vez de
+    levantar erro; uma linha parcialmente preenchida propaga o erro de
+    validação normalmente."""
+    faixas = []
+    for _, linha in df_editado.iterrows():
+        if pd.isna(linha["min_contratos"]) and pd.isna(linha["custo_mensal"]):
+            continue
+        max_contratos = None if pd.isna(linha["max_contratos"]) else int(linha["max_contratos"])
+        faixas.append(FaixaCustoMensal(
+            min_contratos=int(linha["min_contratos"]),
+            max_contratos=max_contratos,
+            custo_mensal=float(linha["custo_mensal"]),
+        ))
+    if not faixas:
+        faixas = [FaixaCustoMensal(1, None, 0.0)]
+    return TabelaCustoMensal(faixas=tuple(faixas))
+
+
 def ajuda(chave: str, default: str = "") -> str:
     """Texto de tooltip (`help=`) a partir do dicionário oficial de
     métricas (tradefolio.metric_registry) -- mesma fonte de verdade usada
@@ -79,6 +102,7 @@ AJUDA_MINIMUM_MARGIN = "Margem exigida pela corretora para manter a posição co
 AJUDA_PERCENTIL_CAUDA = "Qual percentil do drawdown histórico compõe a reserva de cauda do limiar -- P99 é mais conservador (cauda mais extrema) que P95. Resolução do usuário: os dois ficam disponíveis, não um só fixo."
 AJUDA_RESERVA_OPERACIONAL = "Percentual da margem mínima reservado como colchão operacional -- resolução do usuário: '% de minimum_margin', não um valor fixo em R$."
 AJUDA_INCREMENT = "O limiar bruto é arredondado para cima neste incremento (ex. R$500 arredonda R$13.495 para R$13.500)."
+AJUDA_CUSTO_MENSAL = "Custo mensal de plataforma/assinatura por faixa de número de contratos (não precisa ser linear) -- cobrado uma vez, no último pregão do mês. Pode ser 0, ou o mesmo valor para todas as faixas. Debitado sobre a referência real detectada, não sobre o número de contratos simulado (mesma limitação de escala linear já documentada para 'Número de contratos')."
 
 
 st.set_page_config(page_title="Lâmina ao vivo", layout="wide")
@@ -149,7 +173,28 @@ with st.sidebar:
         step=100.0, key=f"increment::{chave_arquivo}", help=AJUDA_INCREMENT,
     )
 
+with st.sidebar:
+    st.header("Custo mensal")
+    st.caption(AJUDA_CUSTO_MENSAL)
+    faixas_editadas = st.data_editor(
+        pd.DataFrame({"min_contratos": [1], "max_contratos": [None], "custo_mensal": [0.0]}),
+        num_rows="dynamic",
+        hide_index=True,
+        column_config={
+            "min_contratos": st.column_config.NumberColumn("Mín. contratos", min_value=1, step=1, required=True),
+            "max_contratos": st.column_config.NumberColumn("Máx. contratos (vazio = sem limite)", min_value=1, step=1),
+            "custo_mensal": st.column_config.NumberColumn("Custo mensal (R$)", min_value=0.0, step=50.0, required=True),
+        },
+        key=f"faixas_custo_mensal::{chave_arquivo}",
+    )
+    try:
+        tabela_custo_mensal = construir_tabela_custo_mensal(faixas_editadas)
+    except (ValueError, TypeError) as erro:
+        st.error(f"Faixas de custo mensal inválidas: {erro}")
+        st.stop()
+
 diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)
 diario_filtrado = filtrar_por_janela(diario, janela)
 
 metricas, equity, drawdown = calcular_pagina1(diario_filtrado, contratos_referencia=contratos_referencia)
@@ -160,10 +205,14 @@ drawdown = escalar_por_contratos(drawdown, n_contratos)
 rotulo_contratos = f"R$/{n_contratos} contrato{'s' if n_contratos != 1 else ''}"
 p_ini, p_fim = metricas["periodo"]
 
+custo_mensal_ativo = tabela_custo_mensal.custo_para(contratos_referencia)
+custo_mensal_total_periodo = diario_filtrado["custo_mensal"].sum()
 st.caption(
     f"Período: {p_ini.strftime('%d/%m/%Y')} a {p_fim.strftime('%d/%m/%Y')} "
     f"({metricas['pregoes']} pregões) · simulação a {n_contratos} contrato(s) "
-    f"(referência detectada no CSV: {contratos_referencia})"
+    f"(referência detectada no CSV: {contratos_referencia}) · "
+    f"custo mensal na faixa de {contratos_referencia} contrato(s): {fmt(custo_mensal_ativo, moeda=True)}/mês "
+    f"({fmt(custo_mensal_total_periodo, moeda=True)} no período mostrado)"
 )
 
 col1, col2, col3, col4 = st.columns(4)
