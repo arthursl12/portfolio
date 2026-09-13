@@ -868,3 +868,21 @@ existia o emolumento B3 por perna, linear e por ordem —
 - Ambas verificadas ponta-a-ponta por script e via `AppTest` do
   Streamlit (sem exceções, lucro líquido/Sharpe/MDD mudam corretamente
   quando um custo não-zero é aplicado).
+- [x] **Correção**: o `st.column_config.NumberColumn` da coluna "Custo
+  mensal (R$)" não aceitava decimal (`step=50.0` sem `format` explícito
+  fazia o Streamlit tratar a coluna como inteira) — corrigido com
+  `format="%.2f", step=0.01`. Verificado ponta-a-ponta com um custo
+  fracionário (R$150,50) via `report.py` CLI.
+- [x] **`custo_mensal.resumo_custo_mensal(diario)`** — pedido explícito
+  do usuário ("quanto foi gasto no total, quanto o custo corroeu o
+  lucro"): `custo_mensal_total`, `lucro_liquido_com_custo_mensal`,
+  `lucro_liquido_sem_custo_mensal`, `fracao_erosao_do_lucro` (=
+  `custo_mensal_total / lucro_liquido_sem_custo_mensal`, NaN quando o
+  robô já seria deficitário mesmo sem o custo mensal — uma fração aí não
+  teria leitura percentual sã), `meses_cobrados`,
+  `custo_mensal_medio_por_mes_cobrado`. Nenhum limite de "saudável" é
+  definido — não há uma convenção para isso em nenhum PDF-fonte nem foi
+  combinado um valor com o usuário; o número é mostrado cru (nota
+  explícita nas duas UIs) em vez de inventar um corte. Nova seção
+  "Custo mensal" em `app.py` (expander) e `report.py`
+  (`gerar_secao_custo_mensal`), ambas verificadas ponta-a-ponta.

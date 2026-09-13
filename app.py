@@ -17,7 +17,12 @@ import streamlit as st
 
 from report import fmt, montar_figura_curva_drawdown, montar_figura_distribuicao
 from tradefolio.alignment import preencher_calendario_b3
-from tradefolio.custo_mensal import FaixaCustoMensal, TabelaCustoMensal, aplicar_custo_mensal
+from tradefolio.custo_mensal import (
+    FaixaCustoMensal,
+    TabelaCustoMensal,
+    aplicar_custo_mensal,
+    resumo_custo_mensal,
+)
 from tradefolio.daily import agregar_diario, detectar_contratos_referencia, escalar_por_contratos
 from tradefolio.drawdowns import drawdown_corrente, episodios_drawdown, tempo_recuperacao_mediano
 from tradefolio.loaders import carregar_ordens
@@ -183,7 +188,9 @@ with st.sidebar:
         column_config={
             "min_contratos": st.column_config.NumberColumn("Mín. contratos", min_value=1, step=1, required=True),
             "max_contratos": st.column_config.NumberColumn("Máx. contratos (vazio = sem limite)", min_value=1, step=1),
-            "custo_mensal": st.column_config.NumberColumn("Custo mensal (R$)", min_value=0.0, step=50.0, required=True),
+            "custo_mensal": st.column_config.NumberColumn(
+                "Custo mensal (R$)", min_value=0.0, step=0.01, format="%.2f", required=True,
+            ),
         },
         key=f"faixas_custo_mensal::{chave_arquivo}",
     )
@@ -246,6 +253,45 @@ with st.expander("Distribuição do resultado diário (por contrato, não escala
     st.caption(
         "Página de distribuição continua por contrato (não multiplicada pelo número de "
         "contratos simulado) -- é uma visão de forma da série, não de R$ na sua posição."
+    )
+
+with st.expander("Custo mensal"):
+    resumo_custo = resumo_custo_mensal(diario_filtrado)
+
+    colcm1, colcm2, colcm3 = st.columns(3)
+    colcm1.metric(
+        "Custo mensal total no período", fmt(resumo_custo["custo_mensal_total"], moeda=True),
+        help="Soma de tudo o que foi debitado como custo mensal (custo_mensal.resumo_custo_mensal) no período mostrado.",
+    )
+    colcm2.metric(
+        "Lucro líquido sem custo mensal", fmt(resumo_custo["lucro_liquido_sem_custo_mensal"], moeda=True),
+        help="O que o lucro líquido teria sido nesse período se não houvesse custo mensal -- escala TOTAL da posição, não por contrato.",
+    )
+    colcm3.metric(
+        "Lucro líquido com custo mensal", fmt(resumo_custo["lucro_liquido_com_custo_mensal"], moeda=True),
+        help="O lucro líquido real, já descontado o custo mensal -- mesma base de lucro_liquido_por_contrato*contratos, escala TOTAL.",
+    )
+
+    fracao_erosao = resumo_custo["fracao_erosao_do_lucro"]
+    valor_erosao = "—" if pd.isna(fracao_erosao) else fmt(fracao_erosao * 100) + "%"
+    custo_medio_mes = resumo_custo["custo_mensal_medio_por_mes_cobrado"]
+    valor_custo_medio = "—" if pd.isna(custo_medio_mes) else fmt(custo_medio_mes, moeda=True)
+
+    colcm4, colcm5 = st.columns(2)
+    colcm4.metric(
+        "Quanto o custo corroeu o lucro", valor_erosao,
+        help="custo_mensal_total / lucro_liquido_sem_custo_mensal -- que fração do lucro que você teria tido sem essa despesa foi consumida por ela. '—' quando o robô já seria deficitário mesmo sem o custo mensal (a fração não teria uma leitura percentual sã).",
+    )
+    colcm5.metric(
+        "Custo médio por mês cobrado", valor_custo_medio,
+        help=f"Média do custo mensal nos {resumo_custo['meses_cobrados']} mês(es) em que ele foi cobrado (> 0) dentro do período mostrado.",
+    )
+
+    st.caption(
+        "Nenhum limite de 'saudável' é definido aqui -- não há uma convenção "
+        "para isso em nenhum dos PDFs-fonte nem foi combinado um valor. O "
+        "número acima é mostrado cru; avalie conforme o contexto do robô "
+        "(ex. quanto capital ele aloca, qual o lucro médio esperado)."
     )
 
 with st.expander("Limiar e RLT (retorno sobre o limiar)"):

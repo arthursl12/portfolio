@@ -11,7 +11,12 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 from tradefolio.alignment import preencher_calendario_b3
-from tradefolio.custo_mensal import FaixaCustoMensal, TabelaCustoMensal, aplicar_custo_mensal
+from tradefolio.custo_mensal import (
+    FaixaCustoMensal,
+    TabelaCustoMensal,
+    aplicar_custo_mensal,
+    resumo_custo_mensal,
+)
 from tradefolio.daily import agregar_diario, detectar_contratos_referencia
 from tradefolio.drawdowns import episodios_drawdown
 from tradefolio.metric_registry import REGISTRO
@@ -220,6 +225,29 @@ def gerar_grafico_distribuicao(p3: dict) -> str:
     return fig_para_base64(montar_figura_distribuicao(p3))
 
 
+def gerar_secao_custo_mensal(resumo: dict) -> str:
+    """Custo mensal: quanto foi gasto, quanto isso corroeu o lucro
+    (pedido explícito do usuário -- fora dos épicos do PDF-fonte). Nenhum
+    limite de "saudável" é definido -- ver tradefolio.custo_mensal.resumo_custo_mensal."""
+    fracao = resumo["fracao_erosao_do_lucro"]
+    valor_erosao = "—" if pd.isna(fracao) else fmt(fracao * 100) + "%"
+    custo_medio = resumo["custo_mensal_medio_por_mes_cobrado"]
+    valor_custo_medio = "—" if pd.isna(custo_medio) else fmt(custo_medio, moeda=True)
+
+    return f"""
+    <h2>Custo mensal</h2>
+    <table>
+      <tr>{rotulo_com_ajuda('Custo mensal total no período', '', 'Soma de tudo o que foi debitado como custo mensal no período.')}<td class="valor">{fmt(resumo['custo_mensal_total'], moeda=True)}</td></tr>
+      <tr>{rotulo_com_ajuda('Lucro líquido sem custo mensal', '', 'O que o lucro líquido teria sido sem essa despesa -- escala TOTAL da posição.')}<td class="valor">{fmt(resumo['lucro_liquido_sem_custo_mensal'], moeda=True)}</td></tr>
+      <tr>{rotulo_com_ajuda('Lucro líquido com custo mensal', '', 'O lucro líquido real, já descontado o custo mensal.')}<td class="valor">{fmt(resumo['lucro_liquido_com_custo_mensal'], moeda=True)}</td></tr>
+      <tr>{rotulo_com_ajuda('Quanto o custo corroeu o lucro', '', "custo_mensal_total / lucro_liquido_sem_custo_mensal. '—' quando o robô já seria deficitário mesmo sem o custo mensal.")}<td class="valor">{valor_erosao}</td></tr>
+      <tr>{rotulo_com_ajuda('Meses cobrados', '', 'Quantos meses do período tiveram custo mensal > 0 debitado.')}<td class="valor">{resumo['meses_cobrados']}</td></tr>
+      <tr>{rotulo_com_ajuda('Custo médio por mês cobrado', '', 'Média do custo mensal só nos meses em que ele foi cobrado.')}<td class="valor">{valor_custo_medio}</td></tr>
+    </table>
+    <p class="nota">Nenhum limite de "saudável" é definido aqui -- não há uma convenção para isso em nenhum dos PDFs-fonte nem foi combinado um valor. O número é mostrado cru; avalie conforme o contexto do robô.</p>
+    """
+
+
 def gerar_secao_pagina4(p4: dict) -> str:
     """Limiar (decomposição P95/P99), RLT e risco normalizado pelo limiar
     (lâmina ideal.pdf §4/5/7)."""
@@ -386,6 +414,7 @@ def gerar_html(
     metricas: dict, grafico_b64: str, grafico_dist_b64: str = "",
     secao_pagina2: str = "", secao_pagina3: str = "",
     secao_pagina4: str = "", secao_pagina5: str = "", secao_pagina6: str = "",
+    secao_custo_mensal: str = "",
     robo: str = "Romanos",
 ) -> str:
     p_ini, p_fim = metricas["periodo"]
@@ -475,6 +504,7 @@ def gerar_html(
     <img src="data:image/png;base64,{grafico_dist_b64}" alt="Distribuição do resultado diário">
     {secao_pagina3}
 
+    {secao_custo_mensal}
     {secao_pagina4}
     {secao_pagina5}
     {secao_pagina6}
@@ -521,6 +551,7 @@ if __name__ == "__main__":
     diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
     tabela_custo_mensal = TabelaCustoMensal(faixas=(FaixaCustoMensal(1, None, args.custo_mensal),))
     diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)
+    secao_custo_mensal = gerar_secao_custo_mensal(resumo_custo_mensal(diario))
 
     metricas, equity, drawdown = calcular_metricas_pagina1(diario, contratos_referencia=contratos_referencia)
     episodios = episodios_drawdown(equity, top_n=len(equity))
@@ -554,7 +585,7 @@ if __name__ == "__main__":
 
     html = gerar_html(
         metricas, grafico_b64, grafico_dist_b64, secao_pagina2, secao_pagina3,
-        secao_pagina4, secao_pagina5, secao_pagina6, robo=robo,
+        secao_pagina4, secao_pagina5, secao_pagina6, secao_custo_mensal=secao_custo_mensal, robo=robo,
     )
 
     with open(args.output_path, "w", encoding="utf-8") as f:

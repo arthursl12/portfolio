@@ -47,6 +47,7 @@ from tradefolio.custo_mensal import (
     TabelaCustoMensal,
     aplicar_custo_mensal,
     custo_mensal_zero,
+    resumo_custo_mensal,
 )
 from tradefolio.report_data import montar_dataframe_diario
 
@@ -162,3 +163,49 @@ def test_aplicar_custo_mensal_todos_os_meses_recebem_debito():
     n_meses = diario.index.to_period("M").nunique()
     assert (ajustado["custo_mensal"] > 0).sum() == n_meses
     assert ajustado["custo_mensal"].sum() == pytest.approx(50.0 * n_meses)
+
+
+def test_resumo_custo_mensal_robo_raiz_real():
+    """AGENTS.md: quanto foi gasto no total, quanto o custo corroeu o
+    lucro (fração do que o lucro SERIA sem o custo mensal). Valores
+    conferidos por script contra tests/fixtures/romanos_orders.csv,
+    custo mensal R$150/mês, contratos_referencia=1."""
+    diario = _diario()
+    tabela = TabelaCustoMensal(faixas=(FaixaCustoMensal(1, None, 150.0),))
+    ajustado = aplicar_custo_mensal(diario, tabela, contratos_referencia=1)
+
+    resumo = resumo_custo_mensal(ajustado)
+
+    assert resumo["custo_mensal_total"] == pytest.approx(2400.0)
+    assert resumo["lucro_liquido_com_custo_mensal"] == pytest.approx(19387.5)
+    assert resumo["lucro_liquido_sem_custo_mensal"] == pytest.approx(21787.5)
+    assert resumo["fracao_erosao_do_lucro"] == pytest.approx(0.110155, rel=1e-5)
+    assert resumo["meses_cobrados"] == 16
+    assert resumo["custo_mensal_medio_por_mes_cobrado"] == pytest.approx(150.0)
+
+
+def test_resumo_custo_mensal_sem_custo_algum():
+    diario = _diario()
+    ajustado = aplicar_custo_mensal(diario, custo_mensal_zero(), contratos_referencia=1)
+    resumo = resumo_custo_mensal(ajustado)
+
+    assert resumo["custo_mensal_total"] == pytest.approx(0.0)
+    assert resumo["fracao_erosao_do_lucro"] == pytest.approx(0.0)
+    assert resumo["meses_cobrados"] == 0
+    assert pd.isna(resumo["custo_mensal_medio_por_mes_cobrado"])
+
+
+def test_resumo_custo_mensal_lucro_ja_negativo_sem_custo_fracao_nao_definida():
+    # se o robo ja seria deficitario mesmo sem o custo mensal, "quanto
+    # o custo corroeu o lucro" nao tem uma leitura percentual sa --
+    # retorna NaN em vez de um numero enganoso (ex. negativo ou > 1).
+    diario_sintetico = pd.DataFrame(
+        {"bruto": [-500.0], "custo": [0.0], "liquido": [-500.0], "liquido_por_contrato": [-500.0], "operou": [True]},
+        index=pd.date_range("2025-01-31", periods=1, freq="D"),
+    )
+    tabela = TabelaCustoMensal(faixas=(FaixaCustoMensal(1, None, 100.0),))
+    ajustado = aplicar_custo_mensal(diario_sintetico, tabela, contratos_referencia=1)
+    resumo = resumo_custo_mensal(ajustado)
+
+    assert resumo["lucro_liquido_sem_custo_mensal"] == pytest.approx(-500.0)
+    assert pd.isna(resumo["fracao_erosao_do_lucro"])

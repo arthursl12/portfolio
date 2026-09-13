@@ -95,3 +95,47 @@ def aplicar_custo_mensal(diario, tabela: TabelaCustoMensal, contratos_referencia
     diario.loc[ultimos_pregoes, "liquido"] -= custo
     diario.loc[ultimos_pregoes, "liquido_por_contrato"] -= custo / contratos_referencia
     return diario
+
+
+def resumo_custo_mensal(diario) -> dict:
+    """Quanto custou, e quanto isso corroeu o lucro (pedido explícito do
+    usuário: "quanto foi gasto no total, quanto o custo corroeu o
+    lucro"). Recebe um `diario` já passado por `aplicar_custo_mensal`
+    (precisa da coluna `custo_mensal`).
+
+    `fracao_erosao_do_lucro` = custo_mensal_total / lucro_liquido SEM o
+    custo mensal -- "de todo o lucro que você teria tido sem essa
+    despesa, que fração ela comeu". Deliberadamente NaN (não um número
+    enganoso) quando o lucro sem custo mensal já é <= 0: se o robô já
+    seria deficitário mesmo sem a assinatura, "% do lucro corroído" não
+    tem uma leitura percentual sã (daria negativo ou > 100% sem
+    significar o que parece significar).
+
+    Nenhum limiar de "saudável"/"não saudável" é definido aqui -- o
+    PDF-fonte não dá um, e inventar um agora seria uma convenção nova
+    silenciosa (AGENTS.md §8). O número é mostrado cru; quem consome
+    decide o que considerar alto.
+    """
+    custo_mensal_total = diario["custo_mensal"].sum()
+    lucro_liquido_com_custo_mensal = diario["liquido"].sum()
+    lucro_liquido_sem_custo_mensal = lucro_liquido_com_custo_mensal + custo_mensal_total
+
+    fracao_erosao = (
+        custo_mensal_total / lucro_liquido_sem_custo_mensal
+        if lucro_liquido_sem_custo_mensal > 0
+        else float("nan")
+    )
+
+    meses_cobrados = int((diario["custo_mensal"] > 0).sum())
+    custo_medio_por_mes_cobrado = (
+        custo_mensal_total / meses_cobrados if meses_cobrados > 0 else float("nan")
+    )
+
+    return {
+        "custo_mensal_total": custo_mensal_total,
+        "lucro_liquido_com_custo_mensal": lucro_liquido_com_custo_mensal,
+        "lucro_liquido_sem_custo_mensal": lucro_liquido_sem_custo_mensal,
+        "fracao_erosao_do_lucro": fracao_erosao,
+        "meses_cobrados": meses_cobrados,
+        "custo_mensal_medio_por_mes_cobrado": custo_medio_por_mes_cobrado,
+    }
