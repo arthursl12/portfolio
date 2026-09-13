@@ -916,3 +916,44 @@ existia o emolumento B3 por perna, linear e por ordem —
   explícita nas duas UIs) em vez de inventar um corte. Nova seção
   "Custo mensal" em `app.py` (expander) e `report.py`
   (`gerar_secao_custo_mensal`), ambas verificadas ponta-a-ponta.
+
+---
+
+## Robustez (Monte Carlo/deterioração) — wiring em `app.py`/`report.py`
+
+`report_data.calcular_robustez` orquestra `tradefolio.deterioracao` +
+`tradefolio.monte_carlo` (AGENTS.md épico 8) na mesma camada que já
+monta `calcular_pagina1-6` -- as duas UIs chamam a mesma função, evitando
+duplicar a ordem de composição (aumentar_custos → aplicar_slippage →
+reduzir_ganhos → ampliar_perdas → remover_melhores_dias →
+duplicar_piores_dias → bootstrap → percentis) em dois lugares.
+
+- [x] **`app.py`**: sidebar "Robustez (Monte Carlo)" (tamanho do bloco,
+  número de trajetórias até 50.000, horizonte, seed opcional, incluir/
+  excluir dias sem operação) + um `st.expander` aninhado "Cenário de
+  deterioração" com as 6 transformações de 8.3, todas com valor neutro
+  por padrão (0 = sem efeito) — a mesma tela serve tanto para "só rodar
+  o Monte Carlo puro" quanto para explorar a grade de deterioração
+  interativamente, sem duas telas separadas. Seção de resultado mostra
+  os percentis, a seed usada (sempre, para reprodutibilidade) e um aviso
+  quando algum parâmetro de deterioração está ativo.
+- [x] **`report.py`** (CLI): `--bloco/--trajetorias/--horizonte/--seed-mc/
+  --excluir-dias-sem-operacao` + `--reducao-ganhos/--aumento-perdas/
+  --aumento-custos/--slippage/--remover-melhores-dias/--duplicar-piores-dias`.
+  `gerar_secao_robustez` no mesmo estilo das outras seções.
+- [x] `probabilidade_toca_margem`/`probabilidade_termina_abaixo_do_limiar`
+  em `app.py` mostram "—" quando a margem mínima ainda não foi informada
+  (mesmo padrão de "Limiar e RLT"); em `report.py`, `--minimum-margin` já
+  é obrigatório para todo o script, então essas duas sempre aparecem.
+- [x] `FORA_DE_ESCOPO`/`_FORA_DE_ESCOPO` (nota de rodapé nas duas UIs)
+  atualizada -- "Monte Carlo/bootstrap, grade de deterioração" removidos
+  da lista do que falta, já que agora existem.
+- Verificado ponta-a-ponta: `AppTest` do Streamlit (sem exceções, com e
+  sem margem mínima informada, com um cenário de deterioração ativo) e
+  `report.py` rodado via CLI com deterioração + seed fixa.
+- [ ] Não incluído: o heatmap/tabela completo de 16 células (0/10/20/30%
+  × 0/10/20/30%) sugerido por "lâmina ideal.pdf" §10 -- a UI atual deixa
+  o usuário mover os dois eixos manualmente e ver UMA célula por vez, não
+  a grade inteira de uma vez (rodar Monte Carlo para as 16 combinações
+  a cada interação seria ~16x mais lento, ainda rápido o bastante, mas
+  não foi pedido nem construído nesta rodada).

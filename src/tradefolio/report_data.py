@@ -14,8 +14,17 @@ from tradefolio.daily import (
     detectar_contratos_referencia,
     pivotar_liquido_por_ativo,
 )
+from tradefolio.deterioracao import (
+    ampliar_perdas,
+    aplicar_slippage,
+    aumentar_custos,
+    duplicar_piores_dias,
+    reduzir_ganhos,
+    remover_melhores_dias,
+)
 from tradefolio.drawdowns import CAPITAL_POR_CONTRATO_PADRAO
 from tradefolio.loaders import carregar_ordens
+from tradefolio.monte_carlo import circular_block_bootstrap, resumo_trajetorias
 from tradefolio.monthly import agregar_mensal
 from tradefolio.trades import reconstruir_trades
 
@@ -282,6 +291,63 @@ def calcular_pagina6(ordens: pd.DataFrame, n_piores_dias: int = 5) -> dict:
         "correlacao_ativos": largo.corr(),
         "compensacao_piores_dias": compensacao_piores_dias,
     }
+
+
+def calcular_robustez(
+    diario: pd.DataFrame,
+    tamanho_bloco: int = 20,
+    n_trajetorias: int = 2000,
+    horizonte: int = 252,
+    seed: int = None,
+    incluir_dias_sem_operacao: bool = True,
+    aumento_custos: float = 0.0,
+    slippage_por_trade: float = 0.0,
+    reducao_ganhos: float = 0.0,
+    aumento_perdas: float = 0.0,
+    remover_melhores_dias_n: int = 0,
+    duplicar_piores_dias_n: int = 0,
+    minimum_margin: float = None,
+    limiar: float = None,
+) -> dict:
+    """Orquestra tradefolio.deterioracao + tradefolio.monte_carlo (AGENTS.md
+    épico 8) -- a mesma camada de composição que já monta
+    calcular_pagina1-6, para que app.py/report.py não dupliquem essa
+    lógica. Escala TOTAL da posição (`diario['liquido']`), mesma decisão
+    de escala já usada por limiar/RLT/vapo/custo_mensal.
+
+    Ordem de composição FIXA (documentada, não escondida): aumentar_custos
+    -> aplicar_slippage -> reduzir_ganhos -> ampliar_perdas ->
+    remover_melhores_dias -> duplicar_piores_dias -> bootstrap ->
+    percentis. Cada transformação só roda se o parâmetro correspondente
+    for diferente do valor neutro (fração/valor 0, n=0) -- com todos os
+    parâmetros de deterioração no padrão, o resultado é exatamente o
+    bootstrap puro, sem nenhuma deterioração aplicada.
+    """
+    if aumento_custos:
+        serie = aumentar_custos(diario["bruto"], diario["custo"], aumento_custos)
+    else:
+        serie = diario["liquido"]
+    if slippage_por_trade:
+        serie = aplicar_slippage(serie, diario["n_trades"], slippage_por_trade)
+    if reducao_ganhos:
+        serie = reduzir_ganhos(serie, reducao_ganhos)
+    if aumento_perdas:
+        serie = ampliar_perdas(serie, aumento_perdas)
+    if remover_melhores_dias_n:
+        serie = remover_melhores_dias(serie, remover_melhores_dias_n)
+    if duplicar_piores_dias_n:
+        serie = duplicar_piores_dias(serie, duplicar_piores_dias_n)
+
+    resultado_bootstrap = circular_block_bootstrap(
+        serie, tamanho_bloco=tamanho_bloco, n_trajetorias=n_trajetorias,
+        horizonte=horizonte, seed=seed, incluir_dias_sem_operacao=incluir_dias_sem_operacao,
+    )
+    resumo = resumo_trajetorias(resultado_bootstrap, minimum_margin=minimum_margin, limiar=limiar)
+    resumo["seed"] = resultado_bootstrap.seed
+    resumo["tamanho_bloco"] = tamanho_bloco
+    resumo["n_trajetorias"] = n_trajetorias
+    resumo["horizonte"] = horizonte
+    return resumo
 
 
 def calcular_pagina3(diario: pd.DataFrame) -> dict:

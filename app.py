@@ -34,6 +34,7 @@ from tradefolio.report_data import (
     calcular_pagina4,
     calcular_pagina5,
     calcular_pagina6,
+    calcular_robustez,
     filtrar_por_janela,
 )
 from tradefolio.validation import extrair_raiz_ativo
@@ -41,9 +42,9 @@ from tradefolio.validation import extrair_raiz_ativo
 # Não implementado nesta versão (lâmina ideal.pdf) -- ver TASKS.md para o
 # que cada um exigiria antes de ser implementado.
 FORA_DE_ESCOPO = (
-    "vapo/política de retirada, Monte Carlo/bootstrap, grade de deterioração, "
-    "linha do tempo de mudanças de mão, selo de tipo de histórico, score geral, "
-    "módulo de portfólio, schema JSON para IA"
+    "vapo/política de retirada, linha do tempo de mudanças de mão, "
+    "selo de tipo de histórico, score geral, módulo de portfólio, "
+    "schema JSON para IA"
 )
 
 DADOS_EXEMPLO_DIR = Path(__file__).parent / "dados_exemplo"
@@ -108,6 +109,17 @@ AJUDA_PERCENTIL_CAUDA = "Qual percentil do drawdown histórico compõe a reserva
 AJUDA_RESERVA_OPERACIONAL = "Percentual da margem mínima reservado como colchão operacional -- resolução do usuário: '% de minimum_margin', não um valor fixo em R$."
 AJUDA_INCREMENT = "O limiar bruto é arredondado para cima neste incremento (ex. R$500 arredonda R$13.495 para R$13.500)."
 AJUDA_CUSTO_MENSAL = "Custo mensal de plataforma/assinatura por faixa de número de contratos (não precisa ser linear) -- cobrado uma vez, no último pregão do mês. Pode ser 0, ou o mesmo valor para todas as faixas. Debitado sobre a referência real detectada, não sobre o número de contratos simulado (mesma limitação de escala linear já documentada para 'Número de contratos')."
+AJUDA_TAMANHO_BLOCO = "Tamanho do bloco de pregões contíguos sorteado por vez (circular block bootstrap) -- blocos maiores preservam mais a autocorrelação local da série; bloco=1 equivale a um sorteio de dias independentes (tarefa 8.1)."
+AJUDA_N_TRAJETORIAS = "Quantas trajetórias simuladas gerar. Mais trajetórias dão percentis mais estáveis, mas demoram mais (50.000 trajetórias x 252 dias roda em <1s neste robô)."
+AJUDA_HORIZONTE = "Quantos pregões cada trajetória simulada tem -- 252 ≈ 1 ano de pregões."
+AJUDA_SEED = "Semente do gerador aleatório. Deixe em branco para uma semente aleatória de verdade -- ela é sempre mostrada no resultado (nunca escondida), e reusá-la reproduz exatamente as mesmas trajetórias."
+AJUDA_INCLUIR_SEM_OPERACAO = "Dias sem operação (NO_TRADE) são histórico legítimo e entram no sorteio como qualquer outro dia -- desmarque para excluí-los explicitamente."
+AJUDA_REDUCAO_GANHOS = "Reduz todo dia positivo em X% antes de simular -- cenário de deterioração (lâmina ideal.pdf §10)."
+AJUDA_AUMENTO_PERDAS = "Amplia todo dia negativo em X% antes de simular (torna as perdas maiores) -- o outro eixo da grade de deterioração."
+AJUDA_AUMENTO_CUSTOS = "Aumenta o custo B3 (emolumento) em X% antes de simular -- reproduz os cenários 'custos +50%/+100%' do PDF-fonte."
+AJUDA_SLIPPAGE = "Custo extra fixo por trade (R$), somado ao emolumento B3 -- simula slippage adicional."
+AJUDA_REMOVER_MELHORES = "Zera os N melhores dias do histórico antes de simular -- testa quão dependente o robô é dos seus melhores eventos."
+AJUDA_DUPLICAR_PIORES = "Dobra (no lugar, não insere uma data nova) o valor dos N piores dias antes de simular -- testa um cenário onde as piores perdas já observadas fossem duas vezes piores."
 
 
 st.set_page_config(page_title="Lâmina ao vivo", layout="wide")
@@ -199,6 +211,55 @@ with st.sidebar:
     except (ValueError, TypeError) as erro:
         st.error(f"Faixas de custo mensal inválidas: {erro}")
         st.stop()
+
+with st.sidebar:
+    st.header("Robustez (Monte Carlo)")
+    tamanho_bloco = st.selectbox(
+        "Tamanho do bloco (pregões)", [5, 10, 20, 40], index=2,
+        key=f"tamanho_bloco::{chave_arquivo}", help=AJUDA_TAMANHO_BLOCO,
+    )
+    n_trajetorias = st.number_input(
+        "Número de trajetórias", min_value=100, max_value=50000, value=2000, step=100,
+        key=f"n_trajetorias::{chave_arquivo}", help=AJUDA_N_TRAJETORIAS,
+    )
+    horizonte = st.number_input(
+        "Horizonte (pregões)", min_value=10, max_value=1000, value=252, step=1,
+        key=f"horizonte::{chave_arquivo}", help=AJUDA_HORIZONTE,
+    )
+    seed_mc = st.number_input(
+        "Seed (vazio = aleatória)", min_value=0, value=None, step=1,
+        key=f"seed_mc::{chave_arquivo}", help=AJUDA_SEED,
+    )
+    incluir_dias_sem_operacao = st.checkbox(
+        "Incluir dias sem operação na reamostragem", value=True,
+        key=f"incluir_sem_op::{chave_arquivo}", help=AJUDA_INCLUIR_SEM_OPERACAO,
+    )
+
+    with st.expander("Cenário de deterioração (opcional)"):
+        reducao_ganhos_pct = st.number_input(
+            "Redução dos ganhos (%)", min_value=0.0, max_value=100.0, value=0.0, step=5.0,
+            key=f"reducao_ganhos::{chave_arquivo}", help=AJUDA_REDUCAO_GANHOS,
+        )
+        aumento_perdas_pct = st.number_input(
+            "Ampliação das perdas (%)", min_value=0.0, value=0.0, step=5.0,
+            key=f"aumento_perdas::{chave_arquivo}", help=AJUDA_AUMENTO_PERDAS,
+        )
+        aumento_custos_pct = st.number_input(
+            "Aumento dos custos B3 (%)", min_value=0.0, value=0.0, step=10.0,
+            key=f"aumento_custos::{chave_arquivo}", help=AJUDA_AUMENTO_CUSTOS,
+        )
+        slippage_valor = st.number_input(
+            "Slippage adicional (R$/trade)", min_value=0.0, value=0.0, step=1.0,
+            key=f"slippage::{chave_arquivo}", help=AJUDA_SLIPPAGE,
+        )
+        remover_melhores_n = st.number_input(
+            "Remover N melhores dias", min_value=0, value=0, step=1,
+            key=f"remover_melhores::{chave_arquivo}", help=AJUDA_REMOVER_MELHORES,
+        )
+        duplicar_piores_n = st.number_input(
+            "Duplicar N piores dias", min_value=0, value=0, step=1,
+            key=f"duplicar_piores::{chave_arquivo}", help=AJUDA_DUPLICAR_PIORES,
+        )
 
 diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
 diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)
@@ -294,6 +355,7 @@ with st.expander("Custo mensal"):
         "(ex. quanto capital ele aloca, qual o lucro médio esperado)."
     )
 
+limiar_ativo_valor = None
 with st.expander("Limiar e RLT (retorno sobre o limiar)"):
     if minimum_margin is None:
         st.info("Informe a margem mínima na barra lateral para calcular o limiar.")
@@ -302,6 +364,7 @@ with st.expander("Limiar e RLT (retorno sobre o limiar)"):
             diario_filtrado, minimum_margin=minimum_margin, percentil_cauda=percentil_cauda,
             fracao_reserva_operacional=fracao_reserva_operacional_pct / 100, increment=increment,
         )
+        limiar_ativo_valor = p4["limiar_ativo"]
         st.caption(
             f"Escala TOTAL da posição (não por contrato) -- {fmt(p4['meses_historico'], 1)} meses de "
             f"histórico na janela selecionada. Percentil ativo: P{p4['percentil_cauda_ativo']}."
@@ -357,6 +420,63 @@ with st.expander("Qualidade da curva"):
             (st.error if alerta["severity"] == "critical" else st.warning)(aviso)
     else:
         st.success("Nenhum alerta de qualidade da curva disparado.")
+
+with st.expander("Robustez (Monte Carlo)"):
+    resumo_robustez = calcular_robustez(
+        diario_filtrado, tamanho_bloco=tamanho_bloco, n_trajetorias=int(n_trajetorias),
+        horizonte=int(horizonte), seed=int(seed_mc) if seed_mc is not None else None,
+        incluir_dias_sem_operacao=incluir_dias_sem_operacao,
+        aumento_custos=aumento_custos_pct / 100, slippage_por_trade=slippage_valor,
+        reducao_ganhos=reducao_ganhos_pct / 100, aumento_perdas=aumento_perdas_pct / 100,
+        remover_melhores_dias_n=int(remover_melhores_n), duplicar_piores_dias_n=int(duplicar_piores_n),
+        minimum_margin=minimum_margin, limiar=limiar_ativo_valor,
+    )
+    st.caption(
+        f"Escala TOTAL da posição -- {resumo_robustez['n_trajetorias']} trajetórias × "
+        f"{resumo_robustez['horizonte']} pregões, bloco={resumo_robustez['tamanho_bloco']}, "
+        f"seed={resumo_robustez['seed']} (reuse essa seed para reproduzir exatamente este resultado)."
+    )
+
+    colmc1, colmc2, colmc3, colmc4, colmc5 = st.columns(5)
+    colmc1.metric("Lucro P5", fmt(resumo_robustez["lucro_p5"], moeda=True), help="5% das trajetórias simuladas tiveram lucro pior que este.")
+    colmc2.metric("Lucro P25", fmt(resumo_robustez["lucro_p25"], moeda=True))
+    colmc3.metric("Lucro P50 (mediano)", fmt(resumo_robustez["lucro_p50"], moeda=True))
+    colmc4.metric("Lucro P75", fmt(resumo_robustez["lucro_p75"], moeda=True))
+    colmc5.metric("Lucro P95", fmt(resumo_robustez["lucro_p95"], moeda=True), help="Só 5% das trajetórias simuladas tiveram lucro melhor que este.")
+
+    colmd1, colmd2, colmd3, colmd4 = st.columns(4)
+    colmd1.metric("MDD P50", fmt(resumo_robustez["mdd_p50"], moeda=True))
+    colmd2.metric("MDD P90", fmt(resumo_robustez["mdd_p90"], moeda=True))
+    colmd3.metric("MDD P95", fmt(resumo_robustez["mdd_p95"], moeda=True), help="90% de confiança de o drawdown simulado não ultrapassar este valor.")
+    colmd4.metric("MDD P99", fmt(resumo_robustez["mdd_p99"], moeda=True), help="99% de confiança de o drawdown simulado não ultrapassar este valor.")
+
+    colp1, colp2, colp3 = st.columns(3)
+    colp1.metric("Probabilidade de prejuízo", fmt(resumo_robustez["probabilidade_prejuizo"] * 100) + "%")
+    if "probabilidade_toca_margem" in resumo_robustez:
+        colp2.metric("Probabilidade de tocar a margem", fmt(resumo_robustez["probabilidade_toca_margem"] * 100) + "%")
+    else:
+        colp2.metric("Probabilidade de tocar a margem", "—", help="Informe a margem mínima na barra lateral para calcular.")
+    if "probabilidade_termina_abaixo_do_limiar" in resumo_robustez:
+        colp3.metric("Prob. terminar abaixo do limiar", fmt(resumo_robustez["probabilidade_termina_abaixo_do_limiar"] * 100) + "%")
+    else:
+        colp3.metric("Prob. terminar abaixo do limiar", "—", help="Informe a margem mínima na barra lateral para calcular o limiar.")
+
+    cenario_ativo = any([
+        reducao_ganhos_pct, aumento_perdas_pct, aumento_custos_pct,
+        slippage_valor, remover_melhores_n, duplicar_piores_n,
+    ])
+    if cenario_ativo:
+        st.warning(
+            f"Cenário de deterioração ativo: redução de ganhos {reducao_ganhos_pct:.0f}% · "
+            f"ampliação de perdas {aumento_perdas_pct:.0f}% · aumento de custos {aumento_custos_pct:.0f}% · "
+            f"slippage R$ {slippage_valor:.2f}/trade · {int(remover_melhores_n)} melhores dias removidos · "
+            f"{int(duplicar_piores_n)} piores dias duplicados."
+        )
+    st.caption(
+        "Reamostragem sobre a janela selecionada (circular block bootstrap) -- não é uma projeção "
+        "garantida, é uma leitura de quão sensível o resultado histórico é à ordem em que os dias "
+        "aconteceram."
+    )
 
 if ordens["Ativo"].map(extrair_raiz_ativo).nunique() > 1:
     with st.expander("Comparação entre ativos"):

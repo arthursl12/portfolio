@@ -29,6 +29,7 @@ from tradefolio.report_data import (
     calcular_pagina4 as calcular_metricas_pagina4,
     calcular_pagina5 as calcular_metricas_pagina5,
     calcular_pagina6 as calcular_metricas_pagina6,
+    calcular_robustez,
 )
 from tradefolio.loaders import carregar_ordens
 
@@ -248,6 +249,40 @@ def gerar_secao_custo_mensal(resumo: dict) -> str:
     """
 
 
+def gerar_secao_robustez(resumo: dict, cenario_ativo: bool, descricao_cenario: str = "") -> str:
+    """Robustez (Monte Carlo) -- circular block bootstrap + percentis
+    (AGENTS.md épico 8). `cenario_ativo`/`descricao_cenario` vêm de
+    quais parâmetros de deterioração (épico 8.3) o chamador passou."""
+    def linha_prob(rotulo, chave, ajuda_texto):
+        if chave not in resumo:
+            return f'<tr><td class="rotulo" title="{html.escape(ajuda_texto)}">{rotulo}</td><td class="valor">—</td></tr>'
+        return f'<tr><td class="rotulo" title="{html.escape(ajuda_texto)}">{rotulo}</td><td class="valor">{fmt(resumo[chave]*100)}%</td></tr>'
+
+    aviso_cenario = (
+        f'<p class="nota">Cenário de deterioração ativo: {descricao_cenario}</p>' if cenario_ativo else ""
+    )
+
+    return f"""
+    <h2>Robustez (Monte Carlo)</h2>
+    <p class="nota">Escala TOTAL da posição -- {resumo['n_trajetorias']} trajetórias &times; {resumo['horizonte']} pregões, bloco={resumo['tamanho_bloco']}, seed={resumo['seed']} (reuse essa seed para reproduzir exatamente este resultado). Reamostragem sobre a janela selecionada (circular block bootstrap) -- não é uma projeção garantida, é uma leitura de quão sensível o resultado histórico é à ordem em que os dias aconteceram.</p>
+    <table>
+      <tr><td class="rotulo" title="5% das trajetórias simuladas tiveram lucro pior que este.">Lucro P5</td><td class="valor">{fmt(resumo['lucro_p5'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Lucro P25</td><td class="valor">{fmt(resumo['lucro_p25'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Lucro P50 (mediano)</td><td class="valor">{fmt(resumo['lucro_p50'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Lucro P75</td><td class="valor">{fmt(resumo['lucro_p75'], moeda=True)}</td></tr>
+      <tr><td class="rotulo" title="Só 5% das trajetórias simuladas tiveram lucro melhor que este.">Lucro P95</td><td class="valor">{fmt(resumo['lucro_p95'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">MDD P50</td><td class="valor">{fmt(resumo['mdd_p50'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">MDD P90</td><td class="valor">{fmt(resumo['mdd_p90'], moeda=True)}</td></tr>
+      <tr><td class="rotulo" title="90% de confiança de o drawdown simulado não ultrapassar este valor.">MDD P95</td><td class="valor">{fmt(resumo['mdd_p95'], moeda=True)}</td></tr>
+      <tr><td class="rotulo" title="99% de confiança de o drawdown simulado não ultrapassar este valor.">MDD P99</td><td class="valor">{fmt(resumo['mdd_p99'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Probabilidade de prejuízo</td><td class="valor">{fmt(resumo['probabilidade_prejuizo']*100)}%</td></tr>
+      {linha_prob('Probabilidade de tocar a margem', 'probabilidade_toca_margem', 'Informe --minimum-margin para calcular.')}
+      {linha_prob('Prob. terminar abaixo do limiar', 'probabilidade_termina_abaixo_do_limiar', 'Informe --minimum-margin para calcular o limiar (Página 4).')}
+    </table>
+    {aviso_cenario}
+    """
+
+
 def gerar_secao_pagina4(p4: dict) -> str:
     """Limiar (decomposição P95/P99), RLT e risco normalizado pelo limiar
     (lâmina ideal.pdf §4/5/7)."""
@@ -404,8 +439,8 @@ def gerar_secao_pagina3(p3: dict) -> str:
 
 _FORA_DE_ESCOPO = (
     "Não implementado nesta versão (lâmina ideal.pdf): vapo/política de retirada, "
-    "Monte Carlo/bootstrap, grade de deterioração, linha do tempo de mudanças de mão, "
-    "selo de tipo de histórico, score geral, módulo de portfólio, schema JSON para IA. "
+    "linha do tempo de mudanças de mão, selo de tipo de histórico, score geral, "
+    "módulo de portfólio, schema JSON para IA. "
     "Ver TASKS.md para o que cada um exigiria antes de ser implementado."
 )
 
@@ -414,7 +449,7 @@ def gerar_html(
     metricas: dict, grafico_b64: str, grafico_dist_b64: str = "",
     secao_pagina2: str = "", secao_pagina3: str = "",
     secao_pagina4: str = "", secao_pagina5: str = "", secao_pagina6: str = "",
-    secao_custo_mensal: str = "",
+    secao_custo_mensal: str = "", secao_robustez: str = "",
     robo: str = "Romanos",
 ) -> str:
     p_ini, p_fim = metricas["periodo"]
@@ -507,6 +542,7 @@ def gerar_html(
     {secao_custo_mensal}
     {secao_pagina4}
     {secao_pagina5}
+    {secao_robustez}
     {secao_pagina6}
 
     <p class="nota">
@@ -538,6 +574,17 @@ def _parse_argumentos():
              "contratos -- para uma tabela em degraus por faixa de contratos, use a "
              "página ao vivo (app.py), que tem um editor de faixas. Padrão 0 (sem custo).",
     )
+    parser.add_argument("--bloco", type=int, choices=(5, 10, 20, 40), default=20, help="Tamanho do bloco (pregões) do circular block bootstrap")
+    parser.add_argument("--trajetorias", type=int, default=2000, help="Número de trajetórias simuladas")
+    parser.add_argument("--horizonte", type=int, default=252, help="Pregões por trajetória simulada (252 ≈ 1 ano)")
+    parser.add_argument("--seed-mc", type=int, default=None, help="Semente do Monte Carlo -- omitido gera uma aleatória (sempre reportada no resultado)")
+    parser.add_argument("--excluir-dias-sem-operacao", action="store_true", help="Exclui dias NO_TRADE do sorteio (padrão: inclui, são histórico legítimo)")
+    parser.add_argument("--reducao-ganhos", type=float, default=0.0, help="Cenário de deterioração: fração de redução dos dias positivos (0.10 = 10%%)")
+    parser.add_argument("--aumento-perdas", type=float, default=0.0, help="Cenário de deterioração: fração de ampliação dos dias negativos (0.10 = 10%%)")
+    parser.add_argument("--aumento-custos", type=float, default=0.0, help="Cenário de deterioração: fração de aumento do custo B3 (0.5 = +50%%)")
+    parser.add_argument("--slippage", type=float, default=0.0, help="Cenário de deterioração: custo extra fixo por trade (R$)")
+    parser.add_argument("--remover-melhores-dias", type=int, default=0, help="Cenário de deterioração: zera os N melhores dias antes de simular")
+    parser.add_argument("--duplicar-piores-dias", type=int, default=0, help="Cenário de deterioração: dobra os N piores dias antes de simular")
     parser.add_argument("--robo", default=None, help="Nome do robô no título (padrão: nome do arquivo)")
     return parser.parse_args()
 
@@ -578,6 +625,28 @@ if __name__ == "__main__":
     p5 = calcular_metricas_pagina5(diario)
     secao_pagina5 = gerar_secao_pagina5(p5)
 
+    resumo_robustez = calcular_robustez(
+        diario, tamanho_bloco=args.bloco, n_trajetorias=args.trajetorias, horizonte=args.horizonte,
+        seed=args.seed_mc, incluir_dias_sem_operacao=not args.excluir_dias_sem_operacao,
+        aumento_custos=args.aumento_custos, slippage_por_trade=args.slippage,
+        reducao_ganhos=args.reducao_ganhos, aumento_perdas=args.aumento_perdas,
+        remover_melhores_dias_n=args.remover_melhores_dias, duplicar_piores_dias_n=args.duplicar_piores_dias,
+        minimum_margin=args.minimum_margin, limiar=p4["limiar_ativo"],
+    )
+    cenario_ativo = any([
+        args.reducao_ganhos, args.aumento_perdas, args.aumento_custos,
+        args.slippage, args.remover_melhores_dias, args.duplicar_piores_dias,
+    ])
+    descricao_cenario = (
+        f"redução de ganhos {args.reducao_ganhos*100:.0f}% &middot; "
+        f"ampliação de perdas {args.aumento_perdas*100:.0f}% &middot; "
+        f"aumento de custos {args.aumento_custos*100:.0f}% &middot; "
+        f"slippage R$ {args.slippage:.2f}/trade &middot; "
+        f"{args.remover_melhores_dias} melhores dias removidos &middot; "
+        f"{args.duplicar_piores_dias} piores dias duplicados"
+    )
+    secao_robustez = gerar_secao_robustez(resumo_robustez, cenario_ativo, descricao_cenario)
+
     secao_pagina6 = ""
     if ordens["Ativo"].map(extrair_raiz_ativo).nunique() > 1:
         p6 = calcular_metricas_pagina6(ordens)
@@ -585,7 +654,8 @@ if __name__ == "__main__":
 
     html = gerar_html(
         metricas, grafico_b64, grafico_dist_b64, secao_pagina2, secao_pagina3,
-        secao_pagina4, secao_pagina5, secao_pagina6, secao_custo_mensal=secao_custo_mensal, robo=robo,
+        secao_pagina4, secao_pagina5, secao_pagina6,
+        secao_custo_mensal=secao_custo_mensal, secao_robustez=secao_robustez, robo=robo,
     )
 
     with open(args.output_path, "w", encoding="utf-8") as f:
