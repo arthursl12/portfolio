@@ -24,8 +24,8 @@ VERSOES = {
     "limiar": "limiar_v1",  # decompor_limiar (P95/P99 toggle, reserva = % da margem) + rlt_*/normalizar_por_limiar
     "concentracao": "concentracao_v1",  # participacao_top_n, resultado_sem_top_n, detectar_alertas_curva, etc.
     "vapo": "vapo_v1",  # PoliticaPisoFixo + gerar_serie_vapo (tarefas 7.1/7.3/7.4); outras 6 politicas de 7.2 nao implementadas
+    "monte_carlo": "monte_carlo_v1",  # circular_block_bootstrap (tarefas 8.1/8.2 unificadas) + resumo_trajetorias (8.4)
     # não implementadas ainda -- ver roadmap (Épicos 6-10 da lâmina ideal)
-    "monte_carlo": None,
     "deterioracao": None,
     "portfolio": None,
     "score": None,

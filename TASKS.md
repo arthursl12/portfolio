@@ -449,62 +449,79 @@ docstring do módulo). `VERSOES["vapo"]` = `"vapo_v1"`.
 
 ## Épico 8 — Monte Carlo e robustez
 
-Nada implementado. `VERSOES["monte_carlo"]` e `VERSOES["deterioracao"]` já
-existem como `None`. `ORIGENS_VALIDAS` (metric_registry, épico 0.2) já
-inclui `"simulated"` — a categoria de origem para tudo que este épico
-produzir já está prevista, não precisa ser inventada agora.
+Tarefas 8.1/8.2/8.4 implementadas em `src/tradefolio/monte_carlo.py`.
+`ORIGENS_VALIDAS` (metric_registry, épico 0.2) já incluía `"simulated"`
+— a categoria de origem para tudo que este épico produz já estava
+prevista, não precisou ser inventada agora. `VERSOES["monte_carlo"]` =
+`"monte_carlo_v1"`.
 
 ### Tarefa 8.1 — Bootstrap diário sincronizado
-- [ ] Sortear a LINHA diária inteira (não cada ativo/robô independente) —
-  `daily.pivotar_liquido_por_ativo` já produz exatamente o formato
-  necessário como entrada (uma linha por data, uma coluna por ativo, já
-  alinhado no mesmo calendário) para manter WIN/WDO sincronizados por
-  data. Para portfólio (Épico 10, não iniciado), o mesmo padrão se
-  estenderia a colunas por robô.
-- [ ] Decisão em aberto: reamostrar sobre o histórico inteiro ou uma
-  janela mais recente? O PDF-fonte só diz "sortear a linha diária
-  inteira", sem especificar o universo de amostragem — assumir histórico
-  inteiro é razoável, mas deveria ser confirmado, não assumido em
-  silêncio.
+- [x] `circular_block_bootstrap(dados, tamanho_bloco=1, ...)` — 8.1 é
+  exatamente o caso especial `tamanho_bloco=1` de 8.2 (tarefa 8.2), uma
+  função genérica só (AGENTS.md §8.1) em vez de duas implementações
+  paralelas. Aceita `pd.Series` (um robô) ou `pd.DataFrame` (várias
+  colunas sincronizadas na mesma linha sorteada -- ex.
+  `daily.pivotar_liquido_por_ativo` para WIN+WDO; o mesmo padrão serve
+  para portfólio, Épico 10, quando existir)
+- [x] Universo de amostragem: decidido por composição, não hardcoded —
+  a função reamostra o que quer que `dados` contenha; histórico inteiro
+  vs. janela recente é escolha do chamador (o mesmo padrão já usado por
+  `report_data.filtrar_por_janela` em todo o resto do código, nunca uma
+  função de cálculo decide sua própria janela)
 
 ### Tarefa 8.2 — Circular block bootstrap
-- [ ] Técnica padrão (blocos contíguos com wraparound), tamanhos de bloco
-  5/10/20/40 pregões como OPÇÕES (não um valor fixo — mesmo espírito do
-  toggle P95/P99 do limiar: AGENTS.md §8.1, não inventar uma escolha
-  única quando o PDF-fonte já lista várias). Parâmetros obrigatórios do
-  PDF: seed, trajetórias, horizonte, bloco, frequência, tratamento dos
-  zeros.
-- [ ] Seed deve ser sempre reportado junto do resultado, nunca fixado
-  silenciosamente — mesmo princípio de proveniência já aplicado em
-  `metric_registry` (nunca misturar dado observado com simulado sem
-  rótulo).
-- [ ] Tratamento dos zeros: dias NO_TRADE (operou=False) são histórico
-  legítimo e deveriam ser reamostrados normalmente como qualquer outro
-  dia — mas o PDF-fonte pede que isso seja um parâmetro explícito, não
-  uma decisão silenciosa do código.
+- [x] Blocos contíguos com wraparound (`% n`), tamanho de bloco como
+  parâmetro livre (5/10/20/40 ou qualquer outro -- toggle, não um valor
+  fixo, mesmo espírito do P95/P99 do limiar). Verificado que
+  `tamanho_bloco == len(série)` produz uma rotação cíclica (não uma
+  reamostragem i.i.d.), provando que a implementação preserva blocos
+  contíguos de fato
+- [x] `seed=None` gera uma semente verdadeira (`numpy.random.SeedSequence`)
+  e a reporta em `ResultadoBootstrap.seed`, nunca escondida; reusar essa
+  semente reproduz exatamente as mesmas trajetórias (verificado)
+- [x] `incluir_dias_sem_operacao` (padrão `True`) — parâmetro explícito,
+  não uma decisão silenciosa; para DataFrame, uma linha só é excluída se
+  TODAS as colunas forem zero nela
+- [x] Vetorizado com NumPy (sem laço Python por trajetória) — 5.000
+  trajetórias × 252 pregões roda em ~17ms contra dados reais
+  (`orders_roboraiz.csv`), bem abaixo do limite que motivaria a tarefa
+  8.5 (processamento em background)
 
 ### Tarefa 8.3 — Cenários deteriorados
-- [ ] Seis transformações independentes e compostáveis: redução dos
-  ganhos, ampliação das perdas, aumento dos custos, slippage adicional,
-  remoção dos melhores dias, duplicação dos piores dias — cada uma é uma
-  função pura sobre a série diária.
-- [ ] "Aumento de custos" reusa `costs.custo_b3` com um multiplicador —
-  trivial uma vez que a grade de deterioração exista.
+- [ ] Não implementada nesta rodada. Seis transformações independentes e
+  compostáveis: redução dos ganhos, ampliação das perdas, aumento dos
+  custos, slippage adicional, remoção dos melhores dias, duplicação dos
+  piores dias — cada uma é uma função pura sobre a série diária.
+- [ ] "Aumento de custos" reusaria `costs.custo_b3` com um multiplicador
+  — trivial de implementar, mas precisa de `diario` (bruto/custo), não
+  só a série `liquido` que `circular_block_bootstrap` consome.
 - [ ] A grade 0%/10%/20%/30% de "lâmina ideal.pdf" §10 (redução de ganhos
   × aumento de perdas) já dá um exemplo concreto de degraus a seguir, em
   vez de inventar uma grade nova.
+- [ ] "Duplicação dos piores dias" não tem uma definição literal única no
+  PDF-fonte (dobrar o valor do dia no lugar, ou inserir uma data nova?)
+  — decisão a confirmar antes de codificar, não assumir.
 
 ### Tarefa 8.4 — Produzir percentis
-- [ ] Agregação pura sobre as trajetórias simuladas (lucro P5/P25/P50/
-  P75/P95; MDD P50/P90/P95/P99; pior mês; TUW; VLT; probabilidade de
-  prejuízo/de tocar a margem/de terminar abaixo do limiar) —
-  `metrics.percentil` já é genérico o suficiente para isso; uma vez que
-  8.1-8.3 produzam uma tabela de trajetórias (linhas = trajetória,
-  colunas = lucro total/MDD/etc.), esta tarefa é mecânica, sem fórmula
-  nova.
-- [ ] "Probabilidade de tocar a margem"/"terminar abaixo do limiar" usam
-  a mesma decisão de escala já resolvida para o limiar (posição total,
-  não por contrato) — não é uma ambiguidade nova.
+- [x] `resumo_trajetorias(resultado, minimum_margin=None, limiar=None)`
+  — lucro P5/P25/P50/P75/P95 (direto, maior é melhor); MDD P50/P90/P95/
+  P99 (reusa a MESMA convenção de `limiar.decompor_limiar`:
+  `percentile(mdd, 100-p)`, não uma nova); probabilidade de prejuízo
+  sempre calculada; probabilidade de tocar a margem/terminar abaixo do
+  limiar só aparecem quando `minimum_margin`/`limiar` são informados
+  (mesmo padrão do `ordens` opcional em `calcular_pagina1`). MDD por
+  trajetória usa a mesma convenção peak-to-trough de `drawdowns.py`
+  (`equity=cumsum`, `drawdown=equity-running_max`), vetorizada, não
+  reimplementada
+- [ ] Pior mês, TUW e VLT por trajetória NÃO implementados: "pior mês"
+  precisaria de uma convenção nova para atribuir "meses" a uma
+  trajetória sintética sem calendário real (candidato natural: blocos de
+  21 pregões, já que `DIAS_UTEIS_ANO_PADRAO=252` implica 252/12=21 --
+  mas isso não foi confirmado com o usuário); TUW por trajetória
+  precisaria vetorizar `drawdowns.time_under_water_max` (hoje um laço
+  por trajetória); VLT exigiria compor com o motor de vapo (Épico 7)
+  sobre cada trajetória simulada. Deixados como próximo passo natural,
+  não fórmulas inventadas às pressas
 
 ### Tarefa 8.5 — Processar em background
 - [ ] Decisão de arquitetura, mesma categoria da Épico 1.4 (pilha de
