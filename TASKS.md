@@ -488,19 +488,32 @@ prevista, não precisou ser inventada agora. `VERSOES["monte_carlo"]` =
   8.5 (processamento em background)
 
 ### Tarefa 8.3 — Cenários deteriorados
-- [ ] Não implementada nesta rodada. Seis transformações independentes e
-  compostáveis: redução dos ganhos, ampliação das perdas, aumento dos
-  custos, slippage adicional, remoção dos melhores dias, duplicação dos
-  piores dias — cada uma é uma função pura sobre a série diária.
-- [ ] "Aumento de custos" reusaria `costs.custo_b3` com um multiplicador
-  — trivial de implementar, mas precisa de `diario` (bruto/custo), não
-  só a série `liquido` que `circular_block_bootstrap` consome.
-- [ ] A grade 0%/10%/20%/30% de "lâmina ideal.pdf" §10 (redução de ganhos
-  × aumento de perdas) já dá um exemplo concreto de degraus a seguir, em
-  vez de inventar uma grade nova.
-- [ ] "Duplicação dos piores dias" não tem uma definição literal única no
-  PDF-fonte (dobrar o valor do dia no lugar, ou inserir uma data nova?)
-  — decisão a confirmar antes de codificar, não assumir.
+- [x] `src/tradefolio/deterioracao.py` — seis transformações
+  independentes e compostáveis (Series in, Series out, sem função
+  "combinada" especial — encadeiam por composição normal de Python):
+  `reduzir_ganhos`, `ampliar_perdas`, `remover_melhores_dias`,
+  `duplicar_piores_dias`, `aumentar_custos`, `aplicar_slippage`.
+  `VERSOES["deterioracao"]` = `"deterioracao_v1"`.
+- [x] `aumentar_custos(bruto, custo, fracao)` recebe as séries
+  componentes (não o `diario` inteiro nem reusa `costs.custo_b3`
+  diretamente — o "aumento" é sobre o custo já calculado, não sobre
+  quantidade × tarifa) e recomputa o líquido — cobre os cenários
+  "custos +50%/+100%" de "lâmina ideal.pdf" §10.
+- [x] A grade 0%/10%/20%/30% de "lâmina ideal.pdf" §10 (redução de ganhos
+  × aumento de perdas) é diretamente reproduzível encadeando
+  `ampliar_perdas(reduzir_ganhos(serie, rg), ap)` e alimentando
+  `monte_carlo.circular_block_bootstrap` — verificado contra
+  `orders_roboraiz.csv` real: deterioração 0/0 → lucro mediano anual
+  simulado +R$5.043 (6,7% prob. de prejuízo); 10/10 → +R$150 (48,6%);
+  20/20 → -R$4.781 (92,1%) — o mesmo padrão qualitativo do exemplo do
+  PDF-fonte (lucro caindo e virando negativo conforme a deterioração
+  aumenta). O heatmap/tabela completo (16 células × Monte Carlo, com
+  MDD P95/VLT mediano/meses com vapo por célula) não foi montado como
+  função própria nesta rodada — só a composição em si foi verificada.
+- [x] "Duplicação dos piores dias": decisão tomada e documentada (não
+  deixada em aberto) — dobra o valor NO LUGAR (`× 2`), não insere uma
+  data nova no calendário (que exigiria decidir onde ela entraria,
+  quebrando o alinhamento com `alignment.preencher_calendario_b3`).
 
 ### Tarefa 8.4 — Produzir percentis
 - [x] `resumo_trajetorias(resultado, minimum_margin=None, limiar=None)`
