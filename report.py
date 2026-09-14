@@ -605,15 +605,18 @@ def gerar_secao_portfolio(
         f"<td class='valor'>{info['contratos_referencia']}</td>"
         f"<td class='valor'>{info['n_contratos']}</td>"
         f"<td class='valor'>{fmt(info.get('margem_por_contrato'), moeda=True)}</td>"
-        f"<td class='valor'>{fmt(info.get('margem_total'), moeda=True)}</td></tr>"
+        f"<td class='valor'>{fmt(info.get('margem_total'), moeda=True)}</td>"
+        f"<td class='valor'>{fmt(info.get('custo_mensal_total'), moeda=True)}</td></tr>"
         for nome, info in resumo_robos.items()
     )
+    custo_mensal_total_combinado = sum(info.get("custo_mensal_total", 0.0) for info in resumo_robos.values())
     secao_composicao = f"""
     <h3 style="margin-top:22px; font-size:14px;">Composição do portfólio</h3>
     <table>
-      <tr><th>Robô</th><th>Contratos de referência (detectado)</th><th>Contratos simulados</th><th>Margem/contrato</th><th>Margem total</th></tr>
+      <tr><th>Robô</th><th>Contratos de referência (detectado)</th><th>Contratos simulados</th><th>Margem/contrato</th><th>Margem total</th><th>Custo mensal total no período</th></tr>
       {linhas_composicao}
     </table>
+    <p class="nota">Custo mensal total combinado no período: {fmt(custo_mensal_total_combinado, moeda=True)} -- já descontado do lucro de cada robô (embutido em `liquido` antes da sincronização), não uma dedução adicional. Cobrado sobre os contratos SIMULADOS de cada robô, não sobre a referência detectada.</p>
     """
 
     secao_correlacoes = "".join(
@@ -784,13 +787,17 @@ def _parse_argumentos():
     p_port = sub.add_parser("portfolio", help="Lâmina agregada de portfólio (2+ robôs, AGENTS.md épico 10)")
     p_port.add_argument("output_path", help="Caminho do HTML a gerar")
     p_port.add_argument(
-        "--robo", dest="robos", action="append", nargs=3,
-        metavar=("CSV", "MARGEM_POR_CONTRATO", "N_CONTRATOS"), required=True,
+        "--robo", dest="robos", action="append", nargs=4,
+        metavar=("CSV", "MARGEM_POR_CONTRATO", "N_CONTRATOS", "CUSTO_MENSAL"), required=True,
         help="Repita para cada robô do portfólio: --robo caminho.csv margem_por_contrato n_contratos "
-             "-- margem é POR CONTRATO (diferente do modo robo, que pede a margem da posição total) e "
-             "n_contratos é quantos contratos DESSE robô entram no portfólio (não precisa ser o "
-             "número de referência detectado no CSV -- é o que permite testar outros dimensionamentos "
-             "sem reinformar a margem). Ambos sempre obrigatórios -- AGENTS.md §8: nunca inventar.",
+             "custo_mensal -- margem é POR CONTRATO (diferente do modo robo, que pede a margem da "
+             "posição total) e n_contratos é quantos contratos DESSE robô entram no portfólio (não "
+             "precisa ser o número de referência detectado no CSV -- é o que permite testar outros "
+             "dimensionamentos sem reinformar a margem). custo_mensal é um valor FIXO em R$/mês "
+             "(mesmo valor para qualquer n_contratos -- para uma tabela em degraus por faixa, use a "
+             "página ao vivo); debitado sobre n_contratos (o tamanho simulado), não sobre a referência "
+             "detectada. Todos sempre obrigatórios -- AGENTS.md §8: nunca inventar (use 0 explicitamente "
+             "para 'sem custo').",
     )
     p_port.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
     p_port.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
@@ -900,10 +907,11 @@ def _rodar_modo_portfolio(args):
     limiares_individuais = {}
     resumo_robos = {}
 
-    for csv_path, margem_por_contrato_str, n_contratos_str in args.robos:
+    for csv_path, margem_por_contrato_str, n_contratos_str, custo_mensal_str in args.robos:
         nome_robo = csv_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
         margem_por_contrato = float(margem_por_contrato_str)
         n_contratos_robo = int(n_contratos_str)
+        custo_mensal_robo = float(custo_mensal_str)
         ordens = carregar_ordens(csv_path)
         try:
             contratos_referencia = detectar_contratos_referencia(ordens)
@@ -924,6 +932,14 @@ def _rodar_modo_portfolio(args):
         # no tamanho simulado, para a comparação ficar na mesma base.
         diario_simulado = diario.copy()
         diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos_robo
+
+        # Custo mensal debitado sobre n_contratos_robo (o tamanho SIMULADO),
+        # não sobre contratos_referencia -- diferente do modo robo (onde
+        # essa mesma escolha é uma limitação documentada porque o diario lá
+        # nunca é reescalado). Aqui já foi reescalado acima, então cobrar
+        # pela faixa de n_contratos_robo é consistente com a simulação.
+        tabela_custo_mensal_robo = TabelaCustoMensal(faixas=(FaixaCustoMensal(1, None, custo_mensal_robo),))
+        diario_simulado = aplicar_custo_mensal(diario_simulado, tabela_custo_mensal_robo, n_contratos_robo)
         diarios[nome_robo] = diario_simulado
 
         margem_total = margem_por_contrato * n_contratos_robo
@@ -933,6 +949,7 @@ def _rodar_modo_portfolio(args):
             "n_contratos": n_contratos_robo,
             "margem_por_contrato": margem_por_contrato,
             "margem_total": margem_total,
+            "custo_mensal_total": diario_simulado["custo_mensal"].sum(),
         }
 
         p4_individual = calcular_metricas_pagina4(

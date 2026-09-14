@@ -653,9 +653,27 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   `sum(minimum_margins.values())` de uma linha, já usado dentro de
   `limiar_agregado_portfolio`; uma função só para isso seria abstração
   sem necessidade, AGENTS.md).
-- [ ] Custo total agregado -- ainda bloqueado por custo mensal não estar
-  wireado no modo Portfólio (mesma lacuna já documentada em "UI wiring"
-  abaixo).
+- [x] Custo mensal por robô e custo total agregado -- pedido de
+  acompanhamento do usuário ("e o custo mensal dos robôs do portfólio?").
+  Cada robô no modo Portfólio agora tem sua própria tabela de custo
+  mensal (mesmo editor por faixas do modo Robô único no `app.py`; um
+  valor fixo `--robo CSV MARGEM N_CONTRATOS CUSTO_MENSAL` no CLI,
+  mesma simplicidade já adotada por `--custo-mensal` no modo robo).
+  Decisão de escala (documentada, diferente do modo Robô único de
+  propósito, não por descuido): debitado sobre `n_contratos_robo` (o
+  tamanho SIMULADO no portfólio), não sobre `contratos_referencia` (o
+  detectado) -- no modo Robô único isso é uma limitação aceita (o
+  `diario` nunca é reescalado lá), mas no modo Portfólio o `diario` já É
+  reescalado para `n_contratos_robo` antes de qualquer outra coisa, então
+  cobrar pela faixa do tamanho simulado é o correto, não uma limitação.
+  Custo mensal se propaga automaticamente para todas as métricas
+  agregadas (embutido em `liquido` antes de `sincronizar_portfolio`,
+  nenhuma lógica nova em `tradefolio.portfolio` -- mesmo princípio já
+  documentado em `custo_mensal.py`: "todo cálculo downstream que já
+  consome liquido/liquido_por_contrato pega o custo automaticamente").
+  Verificado: R$100/mês (resgat, 31 meses) + R$50/mês (gridhedge, 16
+  meses) + R$0 (romanos2) = R$3.900 total; lucro combinado cai de
+  R$64.320,93 para R$60.420,93 -- exatamente a diferença.
 - [ ] VLT — não mais bloqueado tecnicamente (Épico 7/vapo existe), mas
   precisaria compor `vapo.gerar_serie_vapo` sobre `lucro_mensal` com uma
   política e alíquota escolhidas para o PORTFÓLIO -- decisão de
@@ -740,9 +758,11 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   `n_contratos` = referência detectada. Nenhuma fórmula nova em
   `tradefolio.portfolio` -- só reescala o `diario` de entrada antes de
   chamar as mesmas funções (AGENTS.md §16/17).
-- [ ] Custo mensal/janela de filtro/Monte Carlo por robô dentro do modo
-  Portfólio não implementados (fora do escopo funcional desta primeira
-  fatia do Épico 10, ver tarefa 10.3 acima).
+- [x] Custo mensal por robô dentro do modo Portfólio -- ver tarefa 10.3
+  acima (não é mais uma lacuna).
+- [ ] Janela de filtro/Monte Carlo por robô dentro do modo Portfólio
+  ainda não implementados (fora do escopo funcional desta primeira
+  fatia do Épico 10).
 - [x] Tarefa 10.4 completa (6 variantes) + extensão de 10.3 (RLT/risco/
   TUW/pior dia/pior mês/lucro mensal) wireadas em ambas as UIs. `app.py`:
   expander "Correlação entre robôs" ganhou um seletor de variante (radio)

@@ -147,9 +147,20 @@ def rodar_modo_portfolio():
     métricas agregadas, correlação, limiar agregado e benefício da
     diversificação (tradefolio.portfolio). Cada robô roda sua própria
     detecção de contratos_referencia (inclusive o fallback multi-ativo por
-    perna) de forma independente -- nenhuma lógica de custo mensal/janela/
-    Monte Carlo do modo Robô único entra aqui (fora do escopo desta
-    primeira fatia do Épico 10, ver docstring de tradefolio.portfolio).
+    perna) de forma independente. Custo mensal por robô é suportado (ver
+    convenção abaixo); janela de filtro e Monte Carlo do modo Robô único
+    continuam fora daqui (fora do escopo desta primeira fatia do Épico
+    10, ver docstring de tradefolio.portfolio).
+
+    Custo mensal (pedido de acompanhamento do usuário): cada robô tem sua
+    própria tabela de faixas (mesmo editor do modo Robô único), debitada
+    sobre N_CONTRATOS_ROBO (o tamanho SIMULADO no portfólio) -- diferente
+    do modo Robô único, onde o custo é debitado sobre `contratos_referencia`
+    (uma limitação documentada lá, porque o `diario` nunca é reescalado
+    naquele modo). Aqui o `diario` JÁ é reescalado para `n_contratos_robo`
+    antes do custo mensal ser aplicado, então cobrar pela faixa
+    correspondente a `n_contratos_robo` é consistente com a simulação, não
+    uma limitação.
 
     Convenção de escala (pedido explícito do usuário, para permitir
     testar diferentes números de contratos por robô dentro do portfólio
@@ -198,11 +209,11 @@ def rodar_modo_portfolio():
             "Incremento de arredondamento (R$)", min_value=1.0, value=500.0,
             step=100.0, key="portfolio_increment", help=AJUDA_INCREMENT,
         )
-        st.header("Contratos e margem por robô")
+        st.header("Contratos, margem e custo mensal por robô")
         st.caption(
             "Número de contratos simulado por robô DENTRO do portfólio (independente do "
-            "detectado no CSV -- permite testar outros dimensionamentos) e a margem por "
-            "contrato de cada um."
+            "detectado no CSV -- permite testar outros dimensionamentos), a margem por "
+            "contrato de cada um e o custo mensal de plataforma de cada um."
         )
 
     st.header("Portfólio")
@@ -250,6 +261,23 @@ def rodar_modo_portfolio():
                 f"{nome_robo}: margem mínima por contrato (R$)", min_value=0.0, value=None,
                 step=100.0, key=f"portfolio_margin::{nome_arquivo}", help=AJUDA_MINIMUM_MARGIN_PORTFOLIO,
             )
+            st.caption(f"{nome_robo}: custo mensal por faixa de contratos (R$)")
+            faixas_editadas_robo = st.data_editor(
+                pd.DataFrame({"min_contratos": [1], "max_contratos": [None], "custo_mensal": [0.0]}),
+                num_rows="dynamic", hide_index=True,
+                column_config={
+                    "min_contratos": st.column_config.NumberColumn("Mín. contratos", min_value=1, step=1, required=True),
+                    "max_contratos": st.column_config.NumberColumn("Máx. contratos (vazio = sem limite)", min_value=1, step=1),
+                    "custo_mensal": st.column_config.NumberColumn("Custo mensal (R$)", min_value=0.0, step=0.01, format="%.2f", required=True),
+                },
+                key=f"portfolio_faixas_custo_mensal::{nome_arquivo}",
+            )
+            try:
+                tabela_custo_mensal_robo = construir_tabela_custo_mensal(faixas_editadas_robo)
+            except (ValueError, TypeError) as erro:
+                st.error(f"{nome_robo}: faixas de custo mensal inválidas: {erro}")
+                houve_erro = True
+                continue
 
         # Reescala o robô inteiro (não só a margem) para o número de
         # contratos simulado no portfólio -- mesma convenção de
@@ -257,10 +285,20 @@ def rodar_modo_portfolio():
         # aplicada aqui ao `liquido` (escala TOTAL) via liquido_por_contrato.
         diario_simulado = diario.copy()
         diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos_robo
+
+        # Custo mensal debitado sobre N_CONTRATOS_ROBO (o tamanho SIMULADO
+        # no portfólio), não sobre contratos_referencia (o detectado) --
+        # diferente do modo Robô único (onde essa mesma escolha é uma
+        # limitação documentada, porque lá o diario nunca é reescalado).
+        # Aqui o diario JÁ foi reescalado para n_contratos_robo acima, então
+        # cobrar pela faixa correspondente a n_contratos_robo é consistente,
+        # não uma limitação.
+        diario_simulado = aplicar_custo_mensal(diario_simulado, tabela_custo_mensal_robo, int(n_contratos_robo))
         diarios[nome_robo] = diario_simulado
         resumo_robos[nome_robo] = {
             "contratos_referencia": int(contratos_referencia),
             "n_contratos": int(n_contratos_robo),
+            "custo_mensal_total": diario_simulado["custo_mensal"].sum(),
         }
 
         if margem_por_contrato is not None:
@@ -286,11 +324,20 @@ def rodar_modo_portfolio():
             "Contratos simulados no portfólio": info["n_contratos"],
             "Margem/contrato (R$)": fmt(info.get("margem_por_contrato"), moeda=True),
             "Margem total (R$)": fmt(info.get("margem_total"), moeda=True),
+            "Custo mensal total no período (R$)": fmt(info.get("custo_mensal_total"), moeda=True),
         }
         for nome, info in resumo_robos.items()
     }).T
     st.subheader("Composição do portfólio")
     st.table(tabela_composicao)
+
+    custo_mensal_total_combinado = sum(info.get("custo_mensal_total", 0.0) for info in resumo_robos.values())
+    st.caption(
+        f"Custo mensal total combinado no período mostrado: {fmt(custo_mensal_total_combinado, moeda=True)} "
+        "-- já descontado do lucro de cada robô (embutido em `liquido` antes da sincronização), não é uma "
+        "dedução adicional. Cobrado sobre os contratos SIMULADOS no portfólio, não sobre a referência "
+        "detectada (diferente do modo Robô único -- aqui o diario já foi reescalado, ver docstring)."
+    )
 
     largo = sincronizar_portfolio(diarios)
     agregadas = metricas_agregadas(largo)
@@ -409,9 +456,9 @@ def rodar_modo_portfolio():
 
     st.caption(
         "Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, VLT "
-        "agregado (precisa de uma política de vapo escolhida para o portfólio), custo mensal/"
-        "Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10) para o que cada "
-        "um exigiria."
+        "agregado (precisa de uma política de vapo escolhida para o portfólio), janela de "
+        "filtro e Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10) para o "
+        "que cada um exigiria."
     )
 
 
