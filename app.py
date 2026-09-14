@@ -33,6 +33,13 @@ from tradefolio.daily import (
 from tradefolio.drawdowns import drawdown_corrente, episodios_drawdown, tempo_recuperacao_mediano
 from tradefolio.loaders import carregar_ordens
 from tradefolio.metric_registry import REGISTRO
+from tradefolio.portfolio import (
+    beneficio_diversificacao,
+    correlacao_portfolio,
+    limiar_agregado_portfolio,
+    metricas_agregadas,
+    sincronizar_portfolio,
+)
 from tradefolio.report_data import (
     JANELAS_DISPONIVEIS,
     calcular_pagina1,
@@ -49,8 +56,7 @@ from tradefolio.validation import extrair_raiz_ativo
 # que cada um exigiria antes de ser implementado.
 FORA_DE_ESCOPO = (
     "vapo/política de retirada, linha do tempo de mudanças de mão, "
-    "selo de tipo de histórico, score geral, módulo de portfólio, "
-    "schema JSON para IA"
+    "selo de tipo de histórico, score geral, schema JSON para IA"
 )
 
 DADOS_EXEMPLO_DIR = Path(__file__).parent / "dados_exemplo"
@@ -128,8 +134,187 @@ AJUDA_REMOVER_MELHORES = "Zera os N melhores dias do histórico antes de simular
 AJUDA_DUPLICAR_PIORES = "Dobra (no lugar, não insere uma data nova) o valor dos N piores dias antes de simular -- testa um cenário onde as piores perdas já observadas fossem duas vezes piores."
 
 
+def rodar_modo_portfolio():
+    """Modo Portfólio (AGENTS.md épico 10) -- sincroniza 2+ robôs e mostra
+    métricas agregadas, correlação, limiar agregado e benefício da
+    diversificação (tradefolio.portfolio). Cada robô roda sua própria
+    detecção de contratos_referencia (inclusive o fallback multi-ativo por
+    perna) de forma independente -- nenhuma lógica de custo mensal/janela/
+    Monte Carlo do modo Robô único entra aqui (fora do escopo desta
+    primeira fatia do Épico 10, ver docstring de tradefolio.portfolio)."""
+    with st.sidebar:
+        st.header("Robôs do portfólio")
+        fonte = st.radio(
+            "Fonte dos CSVs", ["Robôs de exemplo", "Enviar CSVs"],
+            key="portfolio_fonte", help=AJUDA_FONTE,
+        )
+        if fonte == "Enviar CSVs":
+            arquivos = st.file_uploader(
+                "CSVs de ordens (formato Smarttbot)", type="csv", accept_multiple_files=True,
+                key="portfolio_upload", help=AJUDA_UPLOAD,
+            ) or []
+        else:
+            exemplos = sorted(DADOS_EXEMPLO_DIR.glob("*.csv"))
+            arquivos = st.multiselect(
+                "Robôs", exemplos, format_func=lambda p: p.stem,
+                key="portfolio_exemplos", help=AJUDA_ROBO,
+            )
+
+    if len(arquivos) < 2:
+        st.info("Escolha ao menos 2 robôs na barra lateral para montar um portfólio.")
+        return
+
+    with st.sidebar:
+        st.header("Limiar (portfólio)")
+        percentil_cauda = st.radio(
+            "Percentil de cauda", [95, 99], horizontal=True,
+            key="portfolio_percentil_cauda", help=AJUDA_PERCENTIL_CAUDA,
+        )
+        fracao_reserva_operacional_pct = st.number_input(
+            "Reserva operacional (% da margem)", min_value=0.0, max_value=100.0,
+            value=10.0, step=1.0, key="portfolio_reserva_operacional", help=AJUDA_RESERVA_OPERACIONAL,
+        )
+        increment = st.number_input(
+            "Incremento de arredondamento (R$)", min_value=1.0, value=500.0,
+            step=100.0, key="portfolio_increment", help=AJUDA_INCREMENT,
+        )
+        st.header("Margem mínima por robô")
+        st.caption(AJUDA_MINIMUM_MARGIN)
+
+    st.header("Portfólio")
+
+    diarios, minimum_margins, limiares_individuais = {}, {}, {}
+    houve_erro = False
+
+    for arquivo in arquivos:
+        nome_arquivo = getattr(arquivo, "name", str(arquivo))
+        nome_robo = Path(nome_arquivo).stem
+        try:
+            ordens = carregar_ordens(arquivo)
+        except ValueError as erro:
+            st.error(f"{nome_robo}: CSV inválido: {erro}")
+            houve_erro = True
+            continue
+
+        try:
+            contratos_referencia = detectar_contratos_referencia(ordens)
+        except ValueError:
+            with st.sidebar:
+                st.warning(f"{nome_robo}: detecção sobre o histórico inteiro falhou -- tentando por ativo.")
+                dias_recentes = st.number_input(
+                    f"{nome_robo}: janela p/ config. atual (dias)", min_value=7, max_value=730,
+                    value=90, step=1, key=f"portfolio_dias_recentes::{nome_arquivo}",
+                )
+            try:
+                contratos_referencia = detectar_contratos_referencia_multi_ativo(
+                    ordens, dias_recentes=int(dias_recentes)
+                )
+            except ValueError as erro:
+                st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
+                houve_erro = True
+                continue
+
+        diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+        diarios[nome_robo] = diario
+
+        with st.sidebar:
+            margem = st.number_input(
+                f"{nome_robo}: margem mínima (R$)", min_value=0.0, value=None,
+                step=500.0, key=f"portfolio_margin::{nome_arquivo}", help=AJUDA_MINIMUM_MARGIN,
+            )
+        if margem is not None:
+            minimum_margins[nome_robo] = margem
+            p4_individual = calcular_pagina4(
+                diario, minimum_margin=margem, percentil_cauda=percentil_cauda,
+                fracao_reserva_operacional=fracao_reserva_operacional_pct / 100, increment=increment,
+            )
+            limiares_individuais[nome_robo] = p4_individual["limiar_ativo"]
+
+    if houve_erro:
+        st.warning("Corrija os erros acima para incluir todos os robôs no portfólio.")
+    if len(diarios) < 2:
+        st.warning("São necessários ao menos 2 robôs válidos para sincronizar um portfólio.")
+        return
+
+    largo = sincronizar_portfolio(diarios)
+    agregadas = metricas_agregadas(largo)
+    correlacao = correlacao_portfolio(largo)
+
+    st.caption(
+        f"{len(diarios)} robôs sincronizados: {', '.join(sorted(diarios))}. Datas em que um "
+        "robô ainda não existia contam como ausentes (NaN) na sincronização, não como zero -- "
+        "só dias em que o robô já existia mas não operou contam como zero (mesma convenção NO_TRADE "
+        "usada dentro de cada robô)."
+    )
+
+    colp1, colp2, colp3 = st.columns(3)
+    colp1.metric("Lucro total (combinado)", fmt(agregadas["lucro_total"], moeda=True))
+    colp2.metric("Maximum Drawdown (combinado)", fmt(agregadas["mdd"], moeda=True))
+    colp3.metric("Expected Shortfall 95% (combinado)", fmt(agregadas["es_95"], moeda=True))
+
+    with st.expander("Correlação entre robôs"):
+        st.caption(
+            "Correlação de Pearson par-a-par (pairwise complete observations -- cada par usa só "
+            "as datas em que ambos os robôs já existiam)."
+        )
+        st.dataframe(correlacao)
+
+    if len(minimum_margins) == len(diarios):
+        limiar_agregado = limiar_agregado_portfolio(
+            largo, minimum_margins, percentil_cauda=percentil_cauda,
+            fracao_reserva_operacional=fracao_reserva_operacional_pct / 100, increment=increment,
+        )
+        limiar_agregado_ativo = limiar_agregado.get("limiar_recomendado", limiar_agregado["limiar_bruto"])
+        soma_individuais = sum(limiares_individuais.values())
+        beneficio = beneficio_diversificacao(soma_individuais, limiar_agregado_ativo)
+
+        with st.expander("Limiar agregado e benefício da diversificação", expanded=True):
+            st.caption(
+                "Limiar calculado sobre a margem SOMADA e o drawdown da série COMBINADA (não é a "
+                "soma dos limiares individuais -- o PDF-fonte avisa explicitamente para não somar)."
+            )
+            tabela_limiar = {
+                "Margem mínima (soma)": limiar_agregado["minimum_margin"],
+                "Reserva de cauda (drawdown combinado)": limiar_agregado["tail_drawdown_reserve"],
+                "Prêmio por histórico curto": limiar_agregado["uncertainty_premium"],
+                "Reserva operacional": limiar_agregado["operational_reserve"],
+                "Limiar bruto": limiar_agregado["limiar_bruto"],
+            }
+            if "limiar_recomendado" in limiar_agregado:
+                tabela_limiar["Limiar recomendado (arredondado)"] = limiar_agregado["limiar_recomendado"]
+            st.table({"Valor (R$)": {k: fmt(v, moeda=True) for k, v in tabela_limiar.items()}})
+
+            colb1, colb2, colb3 = st.columns(3)
+            colb1.metric("Soma dos limiares individuais", fmt(soma_individuais, moeda=True))
+            colb2.metric("Limiar agregado do portfólio", fmt(limiar_agregado_ativo, moeda=True))
+            colb3.metric(
+                "Benefício da diversificação",
+                f"{fmt(beneficio['beneficio_rs'], moeda=True)} ({fmt(beneficio['beneficio_pct'] * 100)}%)",
+            )
+    else:
+        st.info(
+            "Informe a margem mínima de cada robô na barra lateral para calcular o limiar agregado "
+            "e o benefício da diversificação."
+        )
+
+    st.caption(
+        "Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, outras "
+        "variantes de correlação, RLT/custo mensal/Monte Carlo agregados, otimização de pesos. "
+        "Ver TASKS.md (Épico 10) para o que cada um exigiria."
+    )
+
+
 st.set_page_config(page_title="Lâmina ao vivo", layout="wide")
 st.title("Lâmina ao vivo")
+
+modo = st.sidebar.radio(
+    "Modo", ["Robô único", "Portfólio"], key="modo_app",
+    help="Portfólio (AGENTS.md épico 10) sincroniza 2+ robôs e mostra métricas agregadas -- "
+         "não substitui a análise detalhada de um robô único.",
+)
+if modo == "Portfólio":
+    rodar_modo_portfolio()
+    st.stop()
 
 with st.sidebar:
     st.header("Dados")

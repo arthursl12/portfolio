@@ -25,6 +25,13 @@ from tradefolio.daily import (
 )
 from tradefolio.drawdowns import episodios_drawdown
 from tradefolio.metric_registry import REGISTRO
+from tradefolio.portfolio import (
+    beneficio_diversificacao,
+    correlacao_portfolio,
+    limiar_agregado_portfolio,
+    metricas_agregadas,
+    sincronizar_portfolio,
+)
 from tradefolio.validation import extrair_raiz_ativo
 from tradefolio.report_data import (
     montar_dataframe_diario,
@@ -445,7 +452,7 @@ def gerar_secao_pagina3(p3: dict) -> str:
 _FORA_DE_ESCOPO = (
     "Não implementado nesta versão (lâmina ideal.pdf): vapo/política de retirada, "
     "linha do tempo de mudanças de mão, selo de tipo de histórico, score geral, "
-    "módulo de portfólio, schema JSON para IA. "
+    "schema JSON para IA. "
     "Ver TASKS.md para o que cada um exigiria antes de ser implementado."
 )
 
@@ -560,48 +567,161 @@ def gerar_html(
 </html>"""
 
 
+def gerar_secao_portfolio(
+    agregadas: dict, correlacao, limiar_agregado: dict | None, soma_individuais: float | None,
+    beneficio: dict | None, nomes_robos: list,
+) -> str:
+    """Portfólio agregado (AGENTS.md épico 10) -- métricas combinadas,
+    correlação par-a-par e (quando toda margem individual foi informada)
+    limiar agregado + benefício da diversificação."""
+    cabecalho_corr = "".join(f"<th>{n}</th>" for n in correlacao.columns)
+    linhas_corr = "".join(
+        f"<tr><td class='rotulo'>{a}</td>" + "".join(f"<td class='valor'>{fmt(correlacao.loc[a, b], 3)}</td>" for b in correlacao.columns) + "</tr>"
+        for a in correlacao.index
+    )
+
+    secao_limiar = ""
+    if limiar_agregado is not None:
+        limiar_ativo = limiar_agregado.get("limiar_recomendado", limiar_agregado["limiar_bruto"])
+        secao_limiar = f"""
+        <h3 style="margin-top:22px; font-size:14px;">Limiar agregado e benefício da diversificação</h3>
+        <p class="nota">Calculado sobre a margem SOMADA e o drawdown da série COMBINADA -- não é a soma dos limiares individuais (o PDF-fonte avisa explicitamente para não somar).</p>
+        <table>
+          <tr><td class="rotulo">Margem mínima (soma)</td><td class="valor">{fmt(limiar_agregado['minimum_margin'], moeda=True)}</td></tr>
+          <tr><td class="rotulo">Reserva de cauda (drawdown combinado)</td><td class="valor">{fmt(limiar_agregado['tail_drawdown_reserve'], moeda=True)}</td></tr>
+          <tr><td class="rotulo">Prêmio por histórico curto</td><td class="valor">{fmt(limiar_agregado['uncertainty_premium'], moeda=True)}</td></tr>
+          <tr><td class="rotulo">Reserva operacional</td><td class="valor">{fmt(limiar_agregado['operational_reserve'], moeda=True)}</td></tr>
+          <tr><td class="rotulo"><strong>Limiar bruto</strong></td><td class="valor"><strong>{fmt(limiar_agregado['limiar_bruto'], moeda=True)}</strong></td></tr>
+          <tr><td class="rotulo">Soma dos limiares individuais</td><td class="valor">{fmt(soma_individuais, moeda=True)}</td></tr>
+          <tr><td class="rotulo"><strong>Limiar agregado do portfólio</strong></td><td class="valor"><strong>{fmt(limiar_ativo, moeda=True)}</strong></td></tr>
+          <tr><td class="rotulo"><strong>Benefício da diversificação</strong></td><td class="valor"><strong>{fmt(beneficio['beneficio_rs'], moeda=True)} ({fmt(beneficio['beneficio_pct']*100)}%)</strong></td></tr>
+        </table>
+        """
+    else:
+        secao_limiar = '<p class="nota">Margem mínima não informada para todos os robôs -- limiar agregado e benefício da diversificação não calculados.</p>'
+
+    return f"""
+    <h2>Portfólio — {len(nomes_robos)} robôs sincronizados</h2>
+    <p class="nota">Robôs: {', '.join(nomes_robos)}. Datas em que um robô ainda não existia contam como ausentes (NaN) na sincronização, não como zero -- só dias em que o robô já existia mas não operou contam como zero.</p>
+    <table>
+      <tr><td class="rotulo">Lucro total (combinado)</td><td class="valor">{fmt(agregadas['lucro_total'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Maximum Drawdown (combinado)</td><td class="valor">{fmt(agregadas['mdd'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Expected Shortfall 95% (combinado)</td><td class="valor">{fmt(agregadas['es_95'], moeda=True)}</td></tr>
+    </table>
+    <h3 style="margin-top:22px; font-size:14px;">Correlação diária entre robôs (pairwise complete observations)</h3>
+    <table>
+      <tr><th></th>{cabecalho_corr}</tr>
+      {linhas_corr}
+    </table>
+    {secao_limiar}
+    <p class="nota">Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, outras variantes de correlação, RLT/custo mensal/Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10).</p>
+    """
+
+
+def gerar_html_portfolio(secao_portfolio: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Lâmina — Portfólio</title>
+<style>
+  body {{
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    background: #f6f8fa;
+    color: #1f2328;
+    margin: 0;
+    padding: 32px;
+  }}
+  .container {{
+    max-width: 760px;
+    margin: 0 auto;
+    background: #fff;
+    border: 1px solid #d0d7de;
+    border-radius: 10px;
+    padding: 28px 32px;
+  }}
+  h1 {{ font-size: 20px; margin-bottom: 2px; }}
+  .subtitulo {{ color: #57606a; font-size: 13px; margin-bottom: 24px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+  td, th {{ padding: 7px 6px; border-bottom: 1px solid #eaeef2; }}
+  th {{ text-align: left; font-size: 12px; color: #57606a; font-weight: 600; }}
+  .rotulo {{ color: #444; }}
+  .valor {{ text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }}
+  h2 {{ font-size: 16px; margin-top: 32px; border-top: 1px solid #eaeef2; padding-top: 20px; }}
+  .nota {{ font-size: 11px; color: #8b949e; margin-top: 4px; }}
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1>Lâmina — Portfólio</h1>
+    <div class="subtitulo">Métricas agregadas sobre 2+ robôs sincronizados (AGENTS.md épico 10)</div>
+    {secao_portfolio}
+  </div>
+</body>
+</html>"""
+
+
 def _parse_argumentos():
     parser = argparse.ArgumentParser(
         description="Gera a lâmina HTML estática a partir de um CSV de ordens Smarttbot."
     )
-    parser.add_argument("csv_path", help="Caminho do CSV de ordens")
-    parser.add_argument("output_path", help="Caminho do HTML a gerar")
-    parser.add_argument(
+    sub = parser.add_subparsers(dest="modo", required=True)
+
+    p_robo = sub.add_parser("robo", help="Lâmina de um único robô (um CSV)")
+    p_robo.add_argument("csv_path", help="Caminho do CSV de ordens")
+    p_robo.add_argument("output_path", help="Caminho do HTML a gerar")
+    p_robo.add_argument(
         "--minimum-margin", type=float, required=True,
         help="Margem mínima da posição total (R$) -- obrigatório, nunca inventado (AGENTS.md §8)",
     )
-    parser.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
-    parser.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
-    parser.add_argument("--increment", type=float, default=500.0)
-    parser.add_argument(
+    p_robo.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
+    p_robo.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
+    p_robo.add_argument("--increment", type=float, default=500.0)
+    p_robo.add_argument(
         "--custo-mensal", type=float, default=0.0,
         help="Custo mensal de plataforma (R$), mesmo valor para qualquer número de "
              "contratos -- para uma tabela em degraus por faixa de contratos, use a "
              "página ao vivo (app.py), que tem um editor de faixas. Padrão 0 (sem custo).",
     )
-    parser.add_argument("--bloco", type=int, choices=(5, 10, 20, 40), default=20, help="Tamanho do bloco (pregões) do circular block bootstrap")
-    parser.add_argument("--trajetorias", type=int, default=2000, help="Número de trajetórias simuladas")
-    parser.add_argument("--horizonte", type=int, default=252, help="Pregões por trajetória simulada (252 ≈ 1 ano)")
-    parser.add_argument("--seed-mc", type=int, default=None, help="Semente do Monte Carlo -- omitido gera uma aleatória (sempre reportada no resultado)")
-    parser.add_argument("--excluir-dias-sem-operacao", action="store_true", help="Exclui dias NO_TRADE do sorteio (padrão: inclui, são histórico legítimo)")
-    parser.add_argument("--reducao-ganhos", type=float, default=0.0, help="Cenário de deterioração: fração de redução dos dias positivos (0.10 = 10%%)")
-    parser.add_argument("--aumento-perdas", type=float, default=0.0, help="Cenário de deterioração: fração de ampliação dos dias negativos (0.10 = 10%%)")
-    parser.add_argument("--aumento-custos", type=float, default=0.0, help="Cenário de deterioração: fração de aumento do custo B3 (0.5 = +50%%)")
-    parser.add_argument("--slippage", type=float, default=0.0, help="Cenário de deterioração: custo extra fixo por trade (R$)")
-    parser.add_argument("--remover-melhores-dias", type=int, default=0, help="Cenário de deterioração: zera os N melhores dias antes de simular")
-    parser.add_argument("--duplicar-piores-dias", type=int, default=0, help="Cenário de deterioração: dobra os N piores dias antes de simular")
-    parser.add_argument(
+    p_robo.add_argument("--bloco", type=int, choices=(5, 10, 20, 40), default=20, help="Tamanho do bloco (pregões) do circular block bootstrap")
+    p_robo.add_argument("--trajetorias", type=int, default=2000, help="Número de trajetórias simuladas")
+    p_robo.add_argument("--horizonte", type=int, default=252, help="Pregões por trajetória simulada (252 ≈ 1 ano)")
+    p_robo.add_argument("--seed-mc", type=int, default=None, help="Semente do Monte Carlo -- omitido gera uma aleatória (sempre reportada no resultado)")
+    p_robo.add_argument("--excluir-dias-sem-operacao", action="store_true", help="Exclui dias NO_TRADE do sorteio (padrão: inclui, são histórico legítimo)")
+    p_robo.add_argument("--reducao-ganhos", type=float, default=0.0, help="Cenário de deterioração: fração de redução dos dias positivos (0.10 = 10%%)")
+    p_robo.add_argument("--aumento-perdas", type=float, default=0.0, help="Cenário de deterioração: fração de ampliação dos dias negativos (0.10 = 10%%)")
+    p_robo.add_argument("--aumento-custos", type=float, default=0.0, help="Cenário de deterioração: fração de aumento do custo B3 (0.5 = +50%%)")
+    p_robo.add_argument("--slippage", type=float, default=0.0, help="Cenário de deterioração: custo extra fixo por trade (R$)")
+    p_robo.add_argument("--remover-melhores-dias", type=int, default=0, help="Cenário de deterioração: zera os N melhores dias antes de simular")
+    p_robo.add_argument("--duplicar-piores-dias", type=int, default=0, help="Cenário de deterioração: dobra os N piores dias antes de simular")
+    p_robo.add_argument(
         "--dias-recentes-deteccao", type=int, default=90,
         help="Para robôs multi-ativo com proporção fixa entre pernas (ex. 3 WIN + 2 WDO) onde a "
              "detecção sobre o histórico inteiro falha: janela recente (dias) usada para detectar "
              "a configuração ATUAL por ativo. Só entra em uso se a detecção simples falhar.",
     )
-    parser.add_argument("--robo", default=None, help="Nome do robô no título (padrão: nome do arquivo)")
+    p_robo.add_argument("--robo", default=None, help="Nome do robô no título (padrão: nome do arquivo)")
+
+    p_port = sub.add_parser("portfolio", help="Lâmina agregada de portfólio (2+ robôs, AGENTS.md épico 10)")
+    p_port.add_argument("output_path", help="Caminho do HTML a gerar")
+    p_port.add_argument(
+        "--robo", dest="robos", action="append", nargs=2, metavar=("CSV", "MARGEM"), required=True,
+        help="Repita para cada robô do portfólio: --robo caminho.csv margem_minima "
+             "(margem SEMPRE obrigatória aqui -- sem ela não dá para calcular o limiar agregado, "
+             "AGENTS.md §8: nunca inventar)",
+    )
+    p_port.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
+    p_port.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
+    p_port.add_argument("--increment", type=float, default=500.0)
+    p_port.add_argument(
+        "--dias-recentes-deteccao", type=int, default=90,
+        help="Mesma janela de fallback do modo robo, aplicada individualmente a cada robô "
+             "cuja detecção sobre o histórico inteiro falhar.",
+    )
     return parser.parse_args()
 
 
-if __name__ == "__main__":
-    args = _parse_argumentos()
+def _rodar_modo_robo(args):
     robo = args.robo or args.csv_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
 
     ordens = carregar_ordens(args.csv_path)
@@ -685,3 +805,65 @@ if __name__ == "__main__":
     with open(args.output_path, "w", encoding="utf-8") as f:
         f.write(html)
     print("Salvo em:", args.output_path)
+
+
+def _rodar_modo_portfolio(args):
+    diarios = {}
+    minimum_margins = {}
+    limiares_individuais = {}
+
+    for csv_path, margem_str in args.robos:
+        nome_robo = csv_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        margem = float(margem_str)
+        ordens = carregar_ordens(csv_path)
+        try:
+            contratos_referencia = detectar_contratos_referencia(ordens)
+        except ValueError:
+            por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=args.dias_recentes_deteccao)
+            contratos_referencia = sum(por_ativo.values())
+            composicao = " + ".join(f"{qtd} {ativo}" for ativo, qtd in sorted(por_ativo.items()))
+            print(
+                f"{nome_robo}: detecção sobre o histórico inteiro falhou -- detectado por ativo "
+                f"sobre os últimos {args.dias_recentes_deteccao} dias: {composicao} (total {contratos_referencia})."
+            )
+        diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+        diarios[nome_robo] = diario
+        minimum_margins[nome_robo] = margem
+
+        p4_individual = calcular_metricas_pagina4(
+            diario, minimum_margin=margem, percentil_cauda=args.percentil_cauda,
+            fracao_reserva_operacional=args.fracao_reserva_operacional, increment=args.increment,
+        )
+        limiares_individuais[nome_robo] = p4_individual["limiar_ativo"]
+
+    if len(diarios) < 2:
+        raise SystemExit("Modo portfolio exige ao menos 2 robôs (--robo repetido 2+ vezes).")
+
+    largo = sincronizar_portfolio(diarios)
+    agregadas = metricas_agregadas(largo)
+    correlacao = correlacao_portfolio(largo)
+
+    limiar_agregado = limiar_agregado_portfolio(
+        largo, minimum_margins, percentil_cauda=args.percentil_cauda,
+        fracao_reserva_operacional=args.fracao_reserva_operacional, increment=args.increment,
+    )
+    soma_individuais = sum(limiares_individuais.values())
+    limiar_agregado_ativo = limiar_agregado.get("limiar_recomendado", limiar_agregado["limiar_bruto"])
+    beneficio = beneficio_diversificacao(soma_individuais, limiar_agregado_ativo)
+
+    secao_portfolio = gerar_secao_portfolio(
+        agregadas, correlacao, limiar_agregado, soma_individuais, beneficio, sorted(diarios),
+    )
+    html_portfolio = gerar_html_portfolio(secao_portfolio)
+
+    with open(args.output_path, "w", encoding="utf-8") as f:
+        f.write(html_portfolio)
+    print("Salvo em:", args.output_path)
+
+
+if __name__ == "__main__":
+    args = _parse_argumentos()
+    if args.modo == "robo":
+        _rodar_modo_robo(args)
+    else:
+        _rodar_modo_portfolio(args)

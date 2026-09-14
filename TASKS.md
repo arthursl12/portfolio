@@ -689,6 +689,24 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   nenhuma fórmula nova. Verificado com o exemplo real de 10.6 (R$6.000,
   23,5% da soma individual).
 
+### UI wiring (app.py / report.py)
+- [x] `app.py`: modo "Portfólio" (radio no topo da barra lateral, ao lado
+  de "Robô único") — escolhe 2+ robôs (exemplo ou upload), roda a
+  detecção de contratos de cada um independentemente (inclusive o
+  fallback multi-ativo por perna), pede a margem mínima de cada um e
+  mostra lucro/MDD/ES95 combinados, correlação par-a-par e limiar
+  agregado + benefício da diversificação (só quando toda margem foi
+  informada). Verificado via `streamlit.testing.v1.AppTest` com resgat +
+  gridhedge + romanos2 -- números idênticos aos de `test_portfolio.py`.
+- [x] `report.py`: CLI virou subcomandos (`robo` = comportamento
+  original inalterado; `portfolio` = novo, `--robo CSV MARGEM` repetido
+  2+ vezes) gerando um HTML próprio (`gerar_html_portfolio`/
+  `gerar_secao_portfolio`), sem página 1-6 de robô único. Verificado via
+  execução real com os mesmos três CSVs -- números idênticos.
+- [ ] Custo mensal/janela de filtro/Monte Carlo por robô dentro do modo
+  Portfólio não implementados (fora do escopo funcional desta primeira
+  fatia do Épico 10, ver tarefa 10.3 acima).
+
 ### Tarefa 10.8 — Otimização de portfólio
 - [ ] Busca discreta (não otimização contínua, conforme o PDF-fonte pede
   explicitamente) sobre combinações de alocação, com objetivos
