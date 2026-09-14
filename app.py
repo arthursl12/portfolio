@@ -35,6 +35,7 @@ from tradefolio.loaders import carregar_ordens
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
     beneficio_diversificacao,
+    contribuicao_marginal,
     correlacao_dias_conjuntos,
     correlacao_movel,
     correlacao_perdas,
@@ -448,17 +449,38 @@ def rodar_modo_portfolio():
             colrr3.metric("Pior dia / limiar", fmt(rlt["pior_dia_sobre_limiar"] * 100) + "%")
             colrr4.metric("Pior mês / limiar", fmt(rlt["pior_mes_sobre_limiar"] * 100) + "%")
             st.caption(f"Time Under Water máximo (combinado): {agregadas['tuw_max']} pregões.")
+
+        with st.expander("Contribuição marginal por robô", expanded=True):
+            st.caption(
+                "Para cada robô: recomputa o portfólio COM e SEM ele (o portfólio dos demais) e "
+                "mostra a diferença -- lâmina ideal.pdf §13 'Valor marginal do robô'. Lucro é sempre "
+                "aditivo (a diferença é sempre o lucro daquele robô sozinho); MDD/ES95/limiar NÃO são "
+                "-- a diferença aqui já reflete o efeito da diversificação, não apenas o tamanho do robô."
+            )
+            contribuicoes = contribuicao_marginal(
+                diarios, minimum_margins, percentil_cauda=percentil_cauda,
+                fracao_reserva_operacional=fracao_reserva_operacional_pct / 100, increment=increment,
+            )
+            tabela_contribuicao = pd.DataFrame({
+                nome: {
+                    "Δ Lucro": fmt(c["diferenca_lucro"], moeda=True),
+                    "Δ MDD": fmt(c["diferenca_mdd"], moeda=True),
+                    "Δ ES95": fmt(c["diferenca_es95"], moeda=True),
+                    "Δ Limiar (capital necessário)": fmt(c["diferenca_limiar"], moeda=True),
+                }
+                for nome, c in contribuicoes.items()
+            }).T
+            st.table(tabela_contribuicao)
     else:
         st.info(
-            "Informe a margem mínima de cada robô na barra lateral para calcular o limiar agregado "
-            "e o benefício da diversificação."
+            "Informe a margem mínima de cada robô na barra lateral para calcular o limiar agregado, "
+            "o benefício da diversificação e a contribuição marginal de cada robô."
         )
 
     st.caption(
-        "Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, VLT "
-        "agregado (precisa de uma política de vapo escolhida para o portfólio), janela de "
-        "filtro e Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10) para o "
-        "que cada um exigiria."
+        "Fora de escopo nesta versão do modo Portfólio: VLT agregado (precisa de uma política de "
+        "vapo escolhida para o portfólio), janela de filtro e Monte Carlo agregados, otimização de "
+        "pesos. Ver TASKS.md (Épico 10) para o que cada um exigiria."
     )
 
 

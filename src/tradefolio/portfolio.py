@@ -247,3 +247,63 @@ def beneficio_diversificacao(soma_limiares_individuais: float, limiar_agregado: 
         "beneficio_rs": beneficio_rs,
         "beneficio_pct": beneficio_rs / soma_limiares_individuais if soma_limiares_individuais else float("nan"),
     }
+
+
+def contribuicao_marginal(
+    diarios: dict,
+    minimum_margins: dict,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = None,
+) -> dict:
+    """Tarefa 10.5 (lâmina ideal.pdf §13 "Valor marginal do robô"): para
+    cada robô, recomputa lucro/MDD/ES95/limiar agregado COM e SEM aquele
+    robô (o portfólio dos N-1 restantes), e retorna a diferença (COM -
+    SEM). Mecânico uma vez que 10.1/10.3/10.6 já existem -- N+1
+    recomputações completas do portfólio (uma "com todos", uma por robô
+    "sem ele"), caro para N grande mas barato para o número de robôs
+    típico de um portfólio real (medir antes de otimizar, por isso
+    nenhuma otimização foi feita aqui).
+
+    VLT deliberadamente NÃO incluído (mesma lacuna documentada em
+    `rlt_e_risco_portfolio`/TASKS.md: precisaria de uma política de vapo
+    escolhida para o portfólio, uma convenção nova não pedida ainda).
+
+    Exige 2+ robôs -- "contribuição marginal" de um portfólio de 1 robô
+    não é um conceito coerente (não há "portfólio sem ele" para
+    comparar)."""
+    if len(diarios) < 2:
+        raise ValueError("contribuicao_marginal exige ao menos 2 robôs no portfólio")
+
+    def _metricas(subset_diarios: dict, subset_margens: dict) -> tuple[dict, float]:
+        largo = sincronizar_portfolio(subset_diarios)
+        agregadas = metricas_agregadas(largo)
+        limiar = limiar_agregado_portfolio(
+            largo, subset_margens, percentil_cauda, fracao_reserva_operacional, increment,
+        )
+        limiar_ativo = limiar.get("limiar_recomendado", limiar["limiar_bruto"])
+        return agregadas, limiar_ativo
+
+    agregadas_completo, limiar_completo = _metricas(diarios, minimum_margins)
+
+    resultado = {}
+    for nome in diarios:
+        outros_diarios = {k: v for k, v in diarios.items() if k != nome}
+        outros_margens = {k: v for k, v in minimum_margins.items() if k != nome}
+        agregadas_sem, limiar_sem = _metricas(outros_diarios, outros_margens)
+
+        resultado[nome] = {
+            "lucro_com": agregadas_completo["lucro_total"],
+            "lucro_sem": agregadas_sem["lucro_total"],
+            "diferenca_lucro": agregadas_completo["lucro_total"] - agregadas_sem["lucro_total"],
+            "mdd_com": agregadas_completo["mdd"],
+            "mdd_sem": agregadas_sem["mdd"],
+            "diferenca_mdd": agregadas_completo["mdd"] - agregadas_sem["mdd"],
+            "es95_com": agregadas_completo["es_95"],
+            "es95_sem": agregadas_sem["es_95"],
+            "diferenca_es95": agregadas_completo["es_95"] - agregadas_sem["es_95"],
+            "limiar_com": limiar_completo,
+            "limiar_sem": limiar_sem,
+            "diferenca_limiar": limiar_completo - limiar_sem,
+        }
+    return resultado

@@ -27,6 +27,7 @@ from tradefolio.drawdowns import episodios_drawdown
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
     beneficio_diversificacao,
+    contribuicao_marginal,
     correlacao_dias_conjuntos,
     correlacao_movel,
     correlacao_perdas,
@@ -586,7 +587,7 @@ def _tabela_correlacao_html(matriz) -> str:
 def gerar_secao_portfolio(
     resumo_robos: dict, agregadas: dict, correlacoes: dict, correlacao_movel_df,
     janela_movel: int, limiar_agregado: dict | None, soma_individuais: float | None,
-    beneficio: dict | None, rlt: dict | None, nomes_robos: list,
+    beneficio: dict | None, rlt: dict | None, contribuicoes: dict | None, nomes_robos: list,
 ) -> str:
     """Portfólio agregado (AGENTS.md épico 10) -- composição (contratos e
     margem por robô), métricas combinadas, 5 variantes de correlação +
@@ -662,6 +663,24 @@ def gerar_secao_portfolio(
             </table>
             <p class="nota">Time Under Water máximo (combinado): {agregadas['tuw_max']} pregões.</p>
             """
+        secao_contribuicao = ""
+        if contribuicoes is not None:
+            linhas_contribuicao = "".join(
+                f"<tr><td class='rotulo'>{nome}</td>"
+                f"<td class='valor'>{fmt(c['diferenca_lucro'], moeda=True)}</td>"
+                f"<td class='valor'>{fmt(c['diferenca_mdd'], moeda=True)}</td>"
+                f"<td class='valor'>{fmt(c['diferenca_es95'], moeda=True)}</td>"
+                f"<td class='valor'>{fmt(c['diferenca_limiar'], moeda=True)}</td></tr>"
+                for nome, c in contribuicoes.items()
+            )
+            secao_contribuicao = f"""
+            <h3 style="margin-top:22px; font-size:14px;">Contribuição marginal por robô (tarefa 10.5)</h3>
+            <p class="nota">Para cada robô: recomputa o portfólio COM e SEM ele e mostra a diferença -- lâmina ideal.pdf §13 "Valor marginal do robô". Lucro é sempre aditivo (a diferença é sempre o lucro daquele robô sozinho); MDD/ES95/limiar NÃO são -- refletem o efeito da diversificação, não só o tamanho do robô.</p>
+            <table>
+              <tr><th>Robô</th><th>Δ Lucro</th><th>Δ MDD</th><th>Δ ES95</th><th>Δ Limiar (capital necessário)</th></tr>
+              {linhas_contribuicao}
+            </table>
+            """
         secao_limiar = f"""
         <h3 style="margin-top:22px; font-size:14px;">Limiar agregado e benefício da diversificação</h3>
         <p class="nota">Calculado sobre a margem SOMADA e o drawdown da série COMBINADA -- não é a soma dos limiares individuais (o PDF-fonte avisa explicitamente para não somar).</p>
@@ -676,6 +695,7 @@ def gerar_secao_portfolio(
           <tr><td class="rotulo"><strong>Benefício da diversificação</strong></td><td class="valor"><strong>{fmt(beneficio['beneficio_rs'], moeda=True)} ({fmt(beneficio['beneficio_pct']*100)}%)</strong></td></tr>
         </table>
         {secao_rlt}
+        {secao_contribuicao}
         """
     else:
         secao_limiar = '<p class="nota">Margem mínima não informada para todos os robôs -- limiar agregado, RLT e benefício da diversificação não calculados.</p>'
@@ -696,7 +716,7 @@ def gerar_secao_portfolio(
     {secao_correlacoes}
     {secao_movel}
     {secao_limiar}
-    <p class="nota">Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, VLT agregado (precisa de uma política de vapo escolhida para o portfólio), custo mensal/Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10).</p>
+    <p class="nota">Fora de escopo nesta versão do modo Portfólio: VLT agregado (precisa de uma política de vapo escolhida para o portfólio), janela de filtro e Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10).</p>
     """
 
 
@@ -981,10 +1001,14 @@ def _rodar_modo_portfolio(args):
     limiar_agregado_ativo = limiar_agregado.get("limiar_recomendado", limiar_agregado["limiar_bruto"])
     beneficio = beneficio_diversificacao(soma_individuais, limiar_agregado_ativo)
     rlt = rlt_e_risco_portfolio(largo, limiar=limiar_agregado_ativo)
+    contribuicoes = contribuicao_marginal(
+        diarios, minimum_margins, percentil_cauda=args.percentil_cauda,
+        fracao_reserva_operacional=args.fracao_reserva_operacional, increment=args.increment,
+    )
 
     secao_portfolio = gerar_secao_portfolio(
         resumo_robos, agregadas, correlacoes, correlacao_movel_df, args.janela_movel_correlacao,
-        limiar_agregado, soma_individuais, beneficio, rlt, sorted(diarios),
+        limiar_agregado, soma_individuais, beneficio, rlt, contribuicoes, sorted(diarios),
     )
     html_portfolio = gerar_html_portfolio(secao_portfolio)
 

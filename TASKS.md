@@ -703,11 +703,24 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   portfólio, não piora).
 
 ### Tarefa 10.5 — Calcular contribuição marginal
-- [ ] Não implementada nesta rodada. Para cada robô: recomputar o
-  portfólio inteiro com e sem aquele robô (10.1–10.4) e diferenciar
-  lucro/MDD/ES — mecânico uma vez que 10.1/10.3 já existam, mas caro
-  computacionalmente (N+1 recomputações completas para N robôs; medir
-  antes de otimizar).
+- [x] `portfolio.contribuicao_marginal(diarios, minimum_margins, ...)` --
+  para cada robô, recomputa o portfólio COM e SEM ele (o portfólio dos
+  N-1 restantes) e diferencia lucro/MDD/ES95/limiar (lâmina ideal.pdf
+  §13 "Valor marginal do robô"). N+1 recomputações completas -- caro
+  para N grande, mas barato para o número de robôs típico de um
+  portfólio real (nenhuma otimização feita, "medir antes de otimizar").
+  Exige 2+ robôs (`ValueError` caso contrário -- "sem ele" não é um
+  conceito coerente para um portfólio de 1). VLT deliberadamente fora
+  (mesma lacuna de `rlt_e_risco_portfolio`: precisa de uma política de
+  vapo escolhida para o portfólio). Verificado contra dados reais
+  (resgat+gridhedge+romanos2, R$5.000/robô): excluir resgat muda o
+  lucro combinado em -R$34.974 (aditivo, exatamente o lucro do próprio
+  resgat) mas o MDD só piora R$689,44 (não R$ o MDD isolado do resgat --
+  reflete o efeito real da diversificação) e o limiar cai R$5.000 (não
+  R$9.500, o limiar do resgat sozinho). Wireado em `app.py` (expander
+  "Contribuição marginal por robô", junto do limiar agregado) e
+  `report.py` (seção HTML na mesma área) -- ambos só quando toda margem
+  foi informada, mesma condição do limiar agregado.
 
 ### Tarefa 10.6 — Calcular limiar agregado
 - [x] `portfolio.limiar_agregado_portfolio(largo, minimum_margins, ...)`

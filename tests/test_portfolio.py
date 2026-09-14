@@ -46,6 +46,7 @@ import pytest
 
 from tradefolio.portfolio import (
     beneficio_diversificacao,
+    contribuicao_marginal,
     correlacao_dias_conjuntos,
     correlacao_movel,
     correlacao_perdas,
@@ -243,3 +244,52 @@ def test_rlt_e_risco_portfolio():
     assert rlt["rlt_movel_3"] == pytest.approx(0.3112820512820513, abs=1e-6)
     assert rlt["mdd_sobre_limiar"] == pytest.approx(-0.22833333333333333, abs=1e-6)
     assert rlt["pior_mes_sobre_limiar"] == pytest.approx(-0.07307692307692308, abs=1e-6)
+
+
+# --- Tarefa 10.5: contribuição marginal por robô ------------------------
+#
+# lâmina ideal.pdf §13 ("Valor marginal do robô") e tarefas e épicos.pdf
+# (tarefa 10.5): para cada robô, recomputar o portfólio COM e SEM ele e
+# diferenciar lucro/MDD/ES/limiar. VLT deliberadamente fora (mesma lacuna
+# documentada em rlt_e_risco_portfolio/TASKS.md -- precisa de uma
+# política de vapo escolhida para o portfólio). Valores conferidos por
+# script antes deste teste.
+
+_MARGENS_10_5 = {"resgat": 5000.0, "gridhedge": 5000.0, "romanos2": 5000.0}
+_PARAMS_10_5 = dict(percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500)
+
+
+def test_contribuicao_marginal_resgat():
+    diarios = _diarios_reais()
+    contribuicoes = contribuicao_marginal(diarios, _MARGENS_10_5, **_PARAMS_10_5)
+
+    resgat = contribuicoes["resgat"]
+    assert resgat["lucro_com"] == pytest.approx(64320.93, abs=1e-2)
+    assert resgat["lucro_sem"] == pytest.approx(29346.93, abs=1e-2)
+    assert resgat["diferenca_lucro"] == pytest.approx(34974.0, abs=1e-2)
+    assert resgat["diferenca_mdd"] == pytest.approx(-689.44, abs=1e-2)
+    assert resgat["diferenca_es95"] == pytest.approx(0.5025, abs=1e-2)
+    assert resgat["diferenca_limiar"] == pytest.approx(5000.0, abs=1e-6)
+
+
+def test_contribuicao_marginal_gridhedge_e_romanos2():
+    diarios = _diarios_reais()
+    contribuicoes = contribuicao_marginal(diarios, _MARGENS_10_5, **_PARAMS_10_5)
+
+    gridhedge = contribuicoes["gridhedge"]
+    assert gridhedge["diferenca_lucro"] == pytest.approx(7559.43, abs=1e-2)
+    assert gridhedge["diferenca_mdd"] == pytest.approx(-288.5, abs=1e-2)
+    assert gridhedge["diferenca_es95"] == pytest.approx(-136.089318, abs=1e-4)
+    assert gridhedge["diferenca_limiar"] == pytest.approx(6000.0, abs=1e-6)
+
+    romanos2 = contribuicoes["romanos2"]
+    assert romanos2["diferenca_lucro"] == pytest.approx(21787.5, abs=1e-2)
+    assert romanos2["diferenca_mdd"] == pytest.approx(-318.5, abs=1e-2)
+    assert romanos2["diferenca_es95"] == pytest.approx(-139.485, abs=1e-3)
+    assert romanos2["diferenca_limiar"] == pytest.approx(5500.0, abs=1e-6)
+
+
+def test_contribuicao_marginal_exige_ao_menos_2_robos():
+    diarios = {"resgat": _diarios_reais()["resgat"]}
+    with pytest.raises(ValueError, match="2"):
+        contribuicao_marginal(diarios, {"resgat": 5000.0})
