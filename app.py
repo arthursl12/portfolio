@@ -23,7 +23,13 @@ from tradefolio.custo_mensal import (
     aplicar_custo_mensal,
     resumo_custo_mensal,
 )
-from tradefolio.daily import agregar_diario, detectar_contratos_referencia, escalar_por_contratos
+from tradefolio.daily import (
+    agregar_diario,
+    contratos_referencia_por_ativo,
+    detectar_contratos_referencia,
+    detectar_contratos_referencia_multi_ativo,
+    escalar_por_contratos,
+)
 from tradefolio.drawdowns import drawdown_corrente, episodios_drawdown, tempo_recuperacao_mediano
 from tradefolio.loaders import carregar_ordens
 from tradefolio.metric_registry import REGISTRO
@@ -150,20 +156,44 @@ except ValueError as erro:
     st.error(f"CSV inválido: {erro}")
     st.stop()
 
+chave_arquivo = getattr(arquivo_ordens, "name", str(arquivo_ordens))
+
+deteccao_por_ativo = None
 try:
     contratos_referencia = detectar_contratos_referencia(ordens)
-except ValueError as erro:
-    # ex.: um robô com tamanho de posição dinâmico (sem valor dominante de
-    # 'Quantidade executada') -- não é seguro assumir uma referência.
-    st.error(f"Não foi possível determinar o número de contratos de referência: {erro}")
-    st.stop()
+except ValueError:
+    # Robô multi-ativo com proporção fixa entre pernas (ex. Robô Raiz: 3
+    # WIN + 2 WDO por unidade) -- misturar as pernas numa única
+    # distribuição não detecta nada. Tenta por perna sobre uma janela
+    # recente (a proporção pode ter mudado historicamente e só a atual
+    # importa) antes de desistir.
+    with st.sidebar:
+        st.warning(
+            "Não foi possível detectar um único número de contratos sobre "
+            "o histórico inteiro -- tentando por ativo sobre uma janela recente."
+        )
+        dias_recentes_deteccao = st.number_input(
+            "Janela para detectar a configuração atual (dias)", min_value=7, max_value=730,
+            value=90, step=1, key=f"dias_recentes_deteccao::{chave_arquivo}",
+            help="Restringe a detecção da proporção entre ativos (ex. 3 WIN + 2 WDO) aos últimos N dias -- a proporção pode ter mudado no passado, e só a atual importa aqui.",
+        )
+    try:
+        contratos_referencia = detectar_contratos_referencia_multi_ativo(
+            ordens, dias_recentes=int(dias_recentes_deteccao)
+        )
+        deteccao_por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=int(dias_recentes_deteccao))
+    except ValueError as erro:
+        st.error(
+            f"Não foi possível determinar a configuração de contratos, nem por ativo "
+            f"sobre os últimos {int(dias_recentes_deteccao)} dias: {erro}"
+        )
+        st.stop()
 
 with st.sidebar:
     st.header("Filtros")
     janela = st.selectbox(
         "Janela", JANELAS_DISPONIVEIS, index=len(JANELAS_DISPONIVEIS) - 1, help=AJUDA_JANELA,
     )
-    chave_arquivo = getattr(arquivo_ordens, "name", str(arquivo_ordens))
     n_contratos = st.number_input(
         "Número de contratos", min_value=1, max_value=200,
         value=contratos_referencia, step=1,
@@ -282,6 +312,14 @@ st.caption(
     f"custo mensal na faixa de {contratos_referencia} contrato(s): {fmt(custo_mensal_ativo, moeda=True)}/mês "
     f"({fmt(custo_mensal_total_periodo, moeda=True)} no período mostrado)"
 )
+if deteccao_por_ativo is not None:
+    composicao = " + ".join(f"{qtd} {ativo}" for ativo, qtd in sorted(deteccao_por_ativo.items()))
+    st.caption(
+        f"Robô multi-ativo com proporção fixa entre pernas -- \"1 contrato\" aqui = "
+        f"{composicao} (detectado sobre os últimos {int(dias_recentes_deteccao)} dias; "
+        f"total {contratos_referencia}). Não dá para simular WIN e WDO independentemente -- "
+        f"\"Número de contratos\" escala o pacote inteiro proporcionalmente."
+    )
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Lucro líquido", fmt(metricas["lucro_liquido_por_contrato"], moeda=True), help=ajuda("lucro_liquido_por_contrato"))

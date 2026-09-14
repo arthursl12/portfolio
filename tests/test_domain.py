@@ -90,6 +90,28 @@ def test_configuracao_a_partir_da_deteccao_multi_ativo_estavel(tmp_path):
     assert config.valid_to is None
 
 
+def test_configuracao_a_partir_da_deteccao_dias_recentes_recupera_proporcao_atual():
+    # mesmo CSV do teste abaixo (falha sobre o histórico inteiro), mas
+    # restringindo aos últimos 90 dias -- recupera a proporção ATUAL
+    # (3 WIN + 2 WDO), conferida por script antes deste teste.
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ordens = carregar_ordens("dados_exemplo/orders_roboraiz.csv")
+
+    config = configuracao_a_partir_da_deteccao(
+        strategy_id="robo-raiz", ordens=ordens, valid_from=date(2023, 2, 13),
+        dias_recentes=90,
+    )
+    assert config.legs == (
+        PositionLeg(ativo_raiz="WDO", quantidade=2),
+        PositionLeg(ativo_raiz="WIN", quantidade=3),
+    )
+    assert config.contratos_totais == 5
+    assert "90" in config.source
+
+
 def test_configuracao_a_partir_da_deteccao_propaga_erro_quando_perna_muda_de_tamanho():
     # dados_exemplo/orders_roboraiz.csv: WDO nao tem quantidade dominante
     # (mudou de tamanho ao longo do historico) -- uma unica configuracao

@@ -25,8 +25,7 @@ from datetime import date
 
 import pandas as pd
 
-from tradefolio.daily import detectar_contratos_referencia
-from tradefolio.validation import STATUS_EXECUTADA, extrair_raiz_ativo
+from tradefolio.daily import contratos_referencia_por_ativo
 
 
 @dataclass(frozen=True)
@@ -70,26 +69,31 @@ def configuracao_a_partir_da_deteccao(
     valid_to: date | None = None,
     recorded_at: str = "",
     source: str = "daily.detectar_contratos_referencia",
+    dias_recentes: int | None = None,
 ) -> StrategyConfiguration:
     """Popula uma StrategyConfiguration chamando
-    tradefolio.daily.detectar_contratos_referencia POR PERNA (ativo_raiz),
-    não sobre o CSV inteiro -- um robô multi-ativo pode ter uma perna com
-    quantidade estável e outra sem, e a detecção agregada across pernas
-    misturaria as duas distribuições sem sentido. Se qualquer perna não
-    tiver uma quantidade dominante (robô mudou de tamanho de posição
-    naquela perna ao longo do período), o ValueError original de
-    detectar_contratos_referencia se propaga -- uma única configuração
-    para todo o período genuinamente não descreve esse robô."""
-    ordens = ordens.copy()
-    ordens["ativo_raiz"] = ordens["Ativo"].map(extrair_raiz_ativo)
+    `tradefolio.daily.contratos_referencia_por_ativo` -- POR PERNA
+    (ativo_raiz), não sobre o CSV inteiro: um robô multi-ativo pode ter
+    uma perna com quantidade estável e outra sem, e a detecção agregada
+    across pernas misturaria as duas distribuições sem sentido. Se
+    qualquer perna não tiver uma quantidade dominante (robô mudou de
+    tamanho de posição naquela perna ao longo do período), o ValueError
+    original de `detectar_contratos_referencia` se propaga -- uma única
+    configuração para todo o período genuinamente não descreve esse robô.
 
+    `dias_recentes` (opcional): restringe a detecção aos últimos N dias
+    -- útil quando a proporção mudou historicamente (ex. Robô Raiz, "1
+    WDO para 2 WDO") e só a configuração ATUAL importa. Ver docstring de
+    `contratos_referencia_por_ativo` para a mesma ressalva: isso assume
+    a proporção recente é a vigente, não segmenta a história inteira em
+    múltiplas configurações."""
+    por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes)
     legs = tuple(
-        PositionLeg(
-            ativo_raiz=raiz,
-            quantidade=detectar_contratos_referencia(ordens[ordens["ativo_raiz"] == raiz]),
-        )
-        for raiz in sorted(ordens["ativo_raiz"].unique())
+        PositionLeg(ativo_raiz=raiz, quantidade=quantidade)
+        for raiz, quantidade in sorted(por_ativo.items())
     )
+    if dias_recentes is not None:
+        source = f"{source} (últimos {dias_recentes} dias)"
 
     return StrategyConfiguration(
         strategy_id=strategy_id,

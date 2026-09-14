@@ -17,7 +17,12 @@ from tradefolio.custo_mensal import (
     aplicar_custo_mensal,
     resumo_custo_mensal,
 )
-from tradefolio.daily import agregar_diario, detectar_contratos_referencia
+from tradefolio.daily import (
+    agregar_diario,
+    contratos_referencia_por_ativo,
+    detectar_contratos_referencia,
+    detectar_contratos_referencia_multi_ativo,
+)
 from tradefolio.drawdowns import episodios_drawdown
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.validation import extrair_raiz_ativo
@@ -585,6 +590,12 @@ def _parse_argumentos():
     parser.add_argument("--slippage", type=float, default=0.0, help="Cenário de deterioração: custo extra fixo por trade (R$)")
     parser.add_argument("--remover-melhores-dias", type=int, default=0, help="Cenário de deterioração: zera os N melhores dias antes de simular")
     parser.add_argument("--duplicar-piores-dias", type=int, default=0, help="Cenário de deterioração: dobra os N piores dias antes de simular")
+    parser.add_argument(
+        "--dias-recentes-deteccao", type=int, default=90,
+        help="Para robôs multi-ativo com proporção fixa entre pernas (ex. 3 WIN + 2 WDO) onde a "
+             "detecção sobre o histórico inteiro falha: janela recente (dias) usada para detectar "
+             "a configuração ATUAL por ativo. Só entra em uso se a detecção simples falhar.",
+    )
     parser.add_argument("--robo", default=None, help="Nome do robô no título (padrão: nome do arquivo)")
     return parser.parse_args()
 
@@ -594,7 +605,20 @@ if __name__ == "__main__":
     robo = args.robo or args.csv_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
 
     ordens = carregar_ordens(args.csv_path)
-    contratos_referencia = detectar_contratos_referencia(ordens)
+    try:
+        contratos_referencia = detectar_contratos_referencia(ordens)
+    except ValueError:
+        # Robô multi-ativo com proporção fixa entre pernas (ex. Robô Raiz:
+        # 3 WIN + 2 WDO por unidade) -- misturar as pernas numa única
+        # distribuição não detecta nada. Tenta por ativo sobre uma janela
+        # recente antes de desistir.
+        por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=args.dias_recentes_deteccao)
+        contratos_referencia = sum(por_ativo.values())
+        composicao = " + ".join(f"{qtd} {ativo}" for ativo, qtd in sorted(por_ativo.items()))
+        print(
+            f"Detecção sobre o histórico inteiro falhou -- detectado por ativo sobre os "
+            f"últimos {args.dias_recentes_deteccao} dias: {composicao} (total {contratos_referencia})."
+        )
     diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
     tabela_custo_mensal = TabelaCustoMensal(faixas=(FaixaCustoMensal(1, None, args.custo_mensal),))
     diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)

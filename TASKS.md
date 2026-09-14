@@ -135,16 +135,24 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
 - [x] `StrategyConfiguration.legs` (uma `PositionLeg` por raiz de ativo, não
   um único `contratos_referencia` escalar — generaliza para robôs
   multi-ativo), `minimum_margin`, `valid_from`/`valid_to`
-- [x] `configuracao_a_partir_da_deteccao` liga a `detectar_contratos_referencia`
-  existente — rodada POR PERNA (ativo_raiz), não sobre o CSV inteiro.
+- [x] `configuracao_a_partir_da_deteccao` liga a `daily.contratos_referencia_por_ativo`
+  — rodada POR PERNA (ativo_raiz), não sobre o CSV inteiro.
   **Achado real ao testar contra `orders_roboraiz.csv`**: mesmo por perna,
-  WDO não tem quantidade dominante (79,4%, abaixo do limiar de 90%) — esse
-  robô mudou de tamanho de posição ao longo do histórico (confirmado pela
-  própria "lâmina ideal.pdf": "Alteração de 1 WDO para 2 WDO"). A função
-  propaga o erro em vez de forçar um número — uma única configuração para
-  o período inteiro genuinamente não descreve esse robô; o próximo passo
-  natural (não implementado) seria detectar os pontos de mudança e gerar
-  múltiplas `StrategyConfiguration` com `valid_from`/`valid_to` diferentes
+  WDO não tem quantidade dominante sobre o histórico INTEIRO (79,4%,
+  abaixo do limiar de 90%) — esse robô mudou de tamanho de posição ao
+  longo do histórico (confirmado pela própria "lâmina ideal.pdf":
+  "Alteração de 1 WDO para 2 WDO"). A função propaga o erro em vez de
+  forçar um número quando isso acontece.
+- [x] **Resolvido (parcialmente, ver seção "Contratos de referência para
+  robôs multi-ativo com proporção fixa" abaixo)**: `dias_recentes`
+  opcional em `configuracao_a_partir_da_deteccao`/
+  `contratos_referencia_por_ativo` restringe a detecção a uma janela
+  recente, recuperando a proporção ATUAL (3 WIN + 2 WDO, 90 dias) sem
+  precisar segmentar a história inteira. O próximo passo mais completo
+  (não implementado) continua sendo detectar os pontos de mudança e
+  gerar múltiplas `StrategyConfiguration` com `valid_from`/`valid_to`
+  diferentes -- útil para analisar PERÍODOS PASSADOS com a config certa
+  de cada um, não só "qual é a config de agora"
 
 ### Tarefa 2.3 — Períodos de validade
 - [x] `valid_from`/`valid_to`/`recorded_at`/`source` em `StrategyConfiguration`
@@ -822,19 +830,10 @@ convenção nova sem base no PDF-fonte. Ambas as UIs mostram uma nota
   ativos" (só para CSV multi-ativo), drawdown corrente/tempo de
   recuperação mediano finalmente exibidos (já existiam desde 4.3, nunca
   mostrados), nota de "fora de escopo" no rodapé
-- [ ] **Limitação conhecida, não corrigida nesta rodada**: `app.py` já
-  exigia `daily.detectar_contratos_referencia` funcionar sobre o CSV
-  inteiro antes de mostrar qualquer página (`st.stop()` se falhar) —
-  pré-existente, não introduzido aqui. Isso significa que a nova
-  "Comparação entre ativos" fica, na prática, inatingível na página ao
-  vivo para `orders_roboraiz.csv` (o único CSV de exemplo multi-ativo),
-  porque esse CSV falha exatamente nessa checagem antiga (Épico 2.2:
-  WDO não tem quantidade dominante). Verificado que a função/renderização
-  em si funcionam corretamente via `report.py` (script direto) e via
-  `AppTest` do Streamlit chamando `calcular_pagina6` fora desse guard.
-  Corrigir isso exigiria decidir como `app.py` deveria se comportar sem
-  um `contratos_referencia` único (ex.: permitir entrada manual) — fora
-  do escopo pedido nesta rodada.
+- [x] **Limitação corrigida** (ver seção "Contratos de referência para
+  robôs multi-ativo com proporção fixa" abaixo): `app.py`/`report.py` não
+  travam mais para `orders_roboraiz.csv` -- "Comparação entre ativos"
+  agora é alcançável na página ao vivo, verificado via `AppTest`.
 
 ---
 
@@ -957,3 +956,56 @@ duplicar_piores_dias → bootstrap → percentis) em dois lugares.
   a grade inteira de uma vez (rodar Monte Carlo para as 16 combinações
   a cada interação seria ~16x mais lento, ainda rápido o bastante, mas
   não foi pedido nem construído nesta rodada).
+
+---
+
+## Contratos de referência para robôs multi-ativo com proporção fixa (fora dos épicos do PDF-fonte)
+
+Pedido explícito do usuário: Robô Raiz não tem "contratos" independentes
+por ativo -- 1 unidade é um pacote fixo e indivisível (3 WIN + 2 WDO; o
+próximo nível é 4 WDO + 6 WIN, não dá pra aumentar só um lado).
+`daily.detectar_contratos_referencia` sobre o CSV inteiro (mistura WIN e
+WDO numa única distribuição de 'Quantidade executada') não detecta nada
+para esse robô -- e é por isso que `app.py` travava com erro para
+`orders_roboraiz.csv` antes desta correção. Mesmo POR PERNA, o histórico
+INTEIRO de WDO não é 90% dominante (mudou de proporção historicamente,
+Épico 2.2) -- por isso a detecção é restrita a uma JANELA RECENTE (o
+usuário escolheu esta abordagem entre três oferecidas: entrada manual,
+janela recente, ou segmentação histórica completa).
+
+- [x] `daily.contratos_referencia_por_ativo(ordens, dias_recentes=None)` —
+  detecta a quantidade de referência (`detectar_contratos_referencia`)
+  POR `ativo_raiz` separadamente; `dias_recentes` restringe aos últimos N
+  dias corridos a partir da última data em `ordens`. Sem janela, dá
+  exatamente o resultado por-perna que `domain.configuracao_a_partir_da_deteccao`
+  já fazia (comportamento antigo preservado quando não há necessidade de
+  restringir).
+- [x] `daily.detectar_contratos_referencia_multi_ativo(ordens, dias_recentes=None)`
+  — soma as pernas ("1 unidade" = o pacote inteiro, ex. 3+2=5). Para um
+  robô de ativo único, dá exatamente o mesmo resultado de
+  `detectar_contratos_referencia` (verificado).
+- [x] Janela padrão de 90 dias -- conferida por script contra
+  `orders_roboraiz.csv` antes de fixar: 30/60/90/120/180 dias todos
+  recuperam WDO=2/WIN=3 corretamente; 365 dias já falha para WDO
+  (proporção mudou há mais de um ano). O valor é ajustável pelo usuário
+  (sidebar em `app.py`, `--dias-recentes-deteccao` em `report.py`), não
+  fixado silenciosamente.
+- [x] `domain.configuracao_a_partir_da_deteccao` refatorado para reusar
+  `contratos_referencia_por_ativo` (elimina o laço por-perna duplicado)
+  e ganhou o mesmo parâmetro `dias_recentes` opcional.
+- [x] **`app.py`**: quando a detecção simples falha, tenta automaticamente
+  por ativo sobre uma janela recente (input na sidebar, padrão 90 dias)
+  antes de desistir. Uma nova legenda mostra a composição detectada (ex.
+  "1 contrato aqui = 2 WDO + 3 WIN") para o usuário confirmar
+  visualmente que a proporção está certa. `orders_roboraiz.csv` agora
+  carrega a página inteira, incluindo "Comparação entre ativos"
+  (verificado via `AppTest` -- antes desta correção, ambos travavam).
+- [x] **`report.py`** (CLI): mesmo fallback automático + `--dias-recentes-deteccao`
+  (padrão 90). Verificado rodando `orders_roboraiz.csv` via CLI (antes
+  desta correção, o script quebrava com `ValueError` não tratado).
+- [ ] Não implementado: segmentação histórica completa (múltiplas
+  `StrategyConfiguration` com `valid_from`/`valid_to` diferentes para
+  cada período com uma proporção distinta) -- a opção que o usuário NÃO
+  escolheu desta vez. Continua sendo o próximo passo natural se algum
+  dia for preciso analisar corretamente um período PASSADO (não só a
+  configuração atual) de um robô que mudou de proporção.

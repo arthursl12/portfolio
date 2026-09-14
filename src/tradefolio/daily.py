@@ -126,6 +126,45 @@ def detectar_contratos_referencia(ordens: pd.DataFrame) -> int:
     return int(valor_dominante)
 
 
+def contratos_referencia_por_ativo(ordens: pd.DataFrame, dias_recentes: int = None) -> dict:
+    """Detecta a quantidade de referência (`detectar_contratos_referencia`)
+    PARA CADA `ativo_raiz` separadamente -- necessário para robôs
+    multi-ativo com proporção FIXA e indivisível entre pernas (ex. Robô
+    Raiz: 3 WIN + 2 WDO por unidade -- não dá pra aumentar só um lado).
+    Misturar as pernas numa única distribuição de 'Quantidade executada'
+    (como `detectar_contratos_referencia` sozinho faria) não detecta
+    nada -- nem WIN nem WDO dominam a mistura.
+
+    `dias_recentes` (opcional): restringe a detecção aos últimos N dias
+    corridos a partir da última data presente em `ordens`. Existe porque
+    mesmo POR PERNA o histórico inteiro pode não ter uma quantidade
+    dominante -- a proporção pode ter mudado ao longo do tempo (ex.
+    Robô Raiz mudou de 1 para 2 WDO por unidade em algum momento,
+    Épico 2.2). Restringir a uma janela recente assume que a proporção
+    ATUAL é o que importa -- não segmenta a história inteira em múltiplas
+    configurações (isso seria um passo maior, ainda não implementado)."""
+    executadas = ordens[ordens["Status"] == STATUS_EXECUTADA]
+    if dias_recentes is not None:
+        corte = executadas["data"].max() - pd.Timedelta(days=dias_recentes)
+        executadas = executadas[executadas["data"] > corte]
+    executadas = executadas.copy()
+    executadas["ativo_raiz"] = executadas["Ativo"].map(extrair_raiz_ativo)
+
+    return {
+        raiz: detectar_contratos_referencia(executadas[executadas["ativo_raiz"] == raiz])
+        for raiz in sorted(executadas["ativo_raiz"].unique())
+    }
+
+
+def detectar_contratos_referencia_multi_ativo(ordens: pd.DataFrame, dias_recentes: int = None) -> int:
+    """Soma as quantidades de referência por ativo
+    (`contratos_referencia_por_ativo`) -- para um robô multi-ativo com
+    proporção fixa entre pernas, "1 unidade" é o pacote inteiro (ex. 3
+    WIN + 2 WDO = 5), não uma perna isolada. Para um robô de ativo
+    único, dá exatamente o mesmo resultado de `detectar_contratos_referencia`."""
+    return sum(contratos_referencia_por_ativo(ordens, dias_recentes).values())
+
+
 def escalar_por_contratos(valores, n_contratos: float):
     """Escala um valor absoluto (ou série) já normalizado por-contrato
     para um número hipotético de contratos `n_contratos`. Escala linear
