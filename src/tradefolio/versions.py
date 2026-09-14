@@ -26,7 +26,7 @@ VERSOES = {
     "vapo": "vapo_v1",  # PoliticaPisoFixo + gerar_serie_vapo (tarefas 7.1/7.3/7.4); outras 6 politicas de 7.2 nao implementadas
     "monte_carlo": "monte_carlo_v1",  # circular_block_bootstrap (tarefas 8.1/8.2 unificadas) + resumo_trajetorias (8.4)
     "deterioracao": "deterioracao_v1",  # reduzir_ganhos/ampliar_perdas/remover_melhores/duplicar_piores/aumentar_custos/aplicar_slippage (tarefa 8.3)
-    "portfolio": "portfolio_v1",  # sincronizar_portfolio/metricas_agregadas/correlacao/limiar_agregado/beneficio_diversificacao (tarefas 10.1/10.2/10.3-parcial/10.4-parcial/10.6/10.7)
+    "portfolio": "portfolio_v1",  # sincronizar_portfolio/metricas_agregadas (+tuw/pior dia/pior mes/lucro mensal)/6 variantes de correlacao/rlt_e_risco_portfolio/limiar_agregado/beneficio_diversificacao (tarefas 10.1/10.2/10.3-quase completa/10.4-completa/10.6/10.7); v1 mantido -- só aditivo, nenhuma formula existente mudou
     # não implementadas ainda -- ver roadmap (Épicos 6-10 da lâmina ideal)
     "score": None,
     "alertas": None,

@@ -46,10 +46,17 @@ import pytest
 
 from tradefolio.portfolio import (
     beneficio_diversificacao,
+    correlacao_dias_conjuntos,
+    correlacao_movel,
+    correlacao_perdas,
+    correlacao_piores_dias,
     correlacao_portfolio,
+    correlacao_volatilidade_alta,
     limiar_agregado_portfolio,
     metricas_agregadas,
+    rlt_e_risco_portfolio,
     serie_combinada,
+    sincronizar_operou,
     sincronizar_portfolio,
 )
 from tradefolio.report_data import montar_dataframe_diario
@@ -136,3 +143,103 @@ def test_beneficio_diversificacao():
     )
     assert resultado["beneficio_rs"] == pytest.approx(6000.0)
     assert resultado["beneficio_pct"] == pytest.approx(6000.0 / 25500.0)
+
+
+# --- Tarefa 10.4: correlações múltiplas ---------------------------------
+#
+# lâmina ideal.pdf §13 pede "pelo menos quatro versões" (total, dias
+# conjuntos, piores 20%, volatilidade alta); tarefas e épicos.pdf acrescenta
+# "correlação de perdas" e "correlação móvel". Decisão de design (não
+# escondida): as variantes condicionais (piores dias/perdas/volatilidade
+# alta) usam a série COMBINADA do portfólio (serie_combinada) como
+# referência para definir "dia ruim"/"volatilidade alta" -- a mesma série
+# já usada por metricas_agregadas/limiar_agregado_portfolio em todo o
+# módulo, não uma recombinação por par. Valores conferidos por script
+# (resgat+gridhedge+romanos2) antes destes testes.
+
+
+def test_sincronizar_operou_preenche_nao_existia_com_false():
+    diarios = _diarios_reais()
+    operou = sincronizar_operou(diarios)
+    assert set(operou.columns) == {"resgat", "gridhedge", "romanos2"}
+    # resgat operou nesse dia; os outros dois ainda nem existiam.
+    linha = operou.loc["2024-06-03"]
+    assert bool(linha["resgat"]) in (True, False)
+    assert pd.isna(linha["gridhedge"])
+    assert pd.isna(linha["romanos2"])
+
+
+def test_correlacao_dias_conjuntos():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+    operou = sincronizar_operou(diarios)
+    corr = correlacao_dias_conjuntos(largo, operou)
+
+    assert corr.loc["resgat", "gridhedge"] == pytest.approx(0.068778, abs=1e-5)
+    assert corr.loc["resgat", "romanos2"] == pytest.approx(0.101249, abs=1e-5)
+
+
+def test_correlacao_piores_dias():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+    corr = correlacao_piores_dias(largo, fracao=0.20)
+
+    assert corr.loc["resgat", "gridhedge"] == pytest.approx(-0.410263, abs=1e-5)
+    assert corr.loc["resgat", "romanos2"] == pytest.approx(-0.497713, abs=1e-5)
+
+
+def test_correlacao_perdas():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+    corr = correlacao_perdas(largo)
+
+    assert corr.loc["resgat", "gridhedge"] == pytest.approx(-0.236743, abs=1e-5)
+    assert corr.loc["gridhedge", "romanos2"] == pytest.approx(-0.375978, abs=1e-5)
+
+
+def test_correlacao_volatilidade_alta():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+    corr = correlacao_volatilidade_alta(largo, janela=21, fracao=0.20)
+
+    assert corr.loc["resgat", "gridhedge"] == pytest.approx(0.012334, abs=1e-5)
+    assert corr.loc["gridhedge", "romanos2"] == pytest.approx(0.169463, abs=1e-5)
+
+
+def test_correlacao_movel_primeiros_valores_sao_nan():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+    movel = correlacao_movel(largo, janela_pregoes=63)
+
+    assert "resgat × gridhedge" in movel.columns
+    assert movel["resgat × gridhedge"].iloc[:62].isna().all()
+    assert movel["resgat × gridhedge"].iloc[-1] == pytest.approx(0.123492, abs=1e-5)
+
+
+# --- Tarefa 10.3 (extensão): RLT e risco normalizado do portfólio -------
+
+
+def test_metricas_agregadas_traz_tuw_pior_dia_pior_mes_e_lucro_mensal():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+    resumo = metricas_agregadas(largo)
+
+    assert resumo["tuw_max"] == 79
+    assert resumo["pior_dia_total"] == pytest.approx(-1501.5)
+    assert resumo["pior_mes_total"] == pytest.approx(-1425.0)
+    assert resumo["lucro_mensal"].loc["2024-04-30"] == pytest.approx(10311.0)
+
+
+def test_rlt_e_risco_portfolio():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+
+    rlt = rlt_e_risco_portfolio(largo, limiar=19500.0)
+
+    assert rlt["rlt_acumulado"] == pytest.approx(3.2985092307692305, abs=1e-6)
+    assert rlt["rlt_anualizado"] == pytest.approx(1.3253910853008377, abs=1e-6)
+    assert rlt["rlt_mensal_medio"] == pytest.approx(0.10640352357320101, abs=1e-6)
+    assert rlt["rlt_mensal_mediano"] == pytest.approx(0.10923076923076923, abs=1e-6)
+    assert rlt["rlt_movel_3"] == pytest.approx(0.3112820512820513, abs=1e-6)
+    assert rlt["mdd_sobre_limiar"] == pytest.approx(-0.22833333333333333, abs=1e-6)
+    assert rlt["pior_mes_sobre_limiar"] == pytest.approx(-0.07307692307692308, abs=1e-6)

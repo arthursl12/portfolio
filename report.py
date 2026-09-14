@@ -27,9 +27,16 @@ from tradefolio.drawdowns import episodios_drawdown
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
     beneficio_diversificacao,
+    correlacao_dias_conjuntos,
+    correlacao_movel,
+    correlacao_perdas,
+    correlacao_piores_dias,
     correlacao_portfolio,
+    correlacao_volatilidade_alta,
     limiar_agregado_portfolio,
     metricas_agregadas,
+    rlt_e_risco_portfolio,
+    sincronizar_operou,
     sincronizar_portfolio,
 )
 from tradefolio.validation import extrair_raiz_ativo
@@ -567,17 +574,32 @@ def gerar_html(
 </html>"""
 
 
+def _tabela_correlacao_html(matriz) -> str:
+    cabecalho = "".join(f"<th>{n}</th>" for n in matriz.columns)
+    linhas = "".join(
+        f"<tr><td class='rotulo'>{a}</td>" + "".join(f"<td class='valor'>{fmt(matriz.loc[a, b], 3)}</td>" for b in matriz.columns) + "</tr>"
+        for a in matriz.index
+    )
+    return f"<table><tr><th></th>{cabecalho}</tr>{linhas}</table>"
+
+
 def gerar_secao_portfolio(
-    resumo_robos: dict, agregadas: dict, correlacao, limiar_agregado: dict | None,
-    soma_individuais: float | None, beneficio: dict | None, nomes_robos: list,
+    resumo_robos: dict, agregadas: dict, correlacoes: dict, correlacao_movel_df,
+    janela_movel: int, limiar_agregado: dict | None, soma_individuais: float | None,
+    beneficio: dict | None, rlt: dict | None, nomes_robos: list,
 ) -> str:
     """Portfólio agregado (AGENTS.md épico 10) -- composição (contratos e
-    margem por robô), métricas combinadas, correlação par-a-par e
-    limiar agregado + benefício da diversificação. Margem é POR CONTRATO
-    aqui (pedido do usuário, para testar dimensionamentos diferentes sem
-    reinformar a margem toda vez) -- diferente do modo robo único (posição
-    total); margem total de cada robô = margem/contrato × contratos
-    simulados, já refletida em `resumo_robos`."""
+    margem por robô), métricas combinadas, 5 variantes de correlação +
+    correlação móvel, limiar agregado + benefício da diversificação + RLT/
+    risco normalizado. Margem é POR CONTRATO aqui (pedido do usuário, para
+    testar dimensionamentos diferentes sem reinformar a margem toda vez)
+    -- diferente do modo robo único (posição total); margem total de cada
+    robô = margem/contrato × contratos simulados, já refletida em
+    `resumo_robos`. `correlacoes` é um dict {rótulo: matriz} (uma entrada
+    por variante da tarefa 10.4); `correlacao_movel_df` vem de
+    `portfolio.correlacao_movel` -- resumida aqui (mín/mediana/atual por
+    par), não despejada linha a linha (seria uma tabela enorme num
+    relatório estático)."""
     linhas_composicao = "".join(
         f"<tr><td class='rotulo'>{nome}</td>"
         f"<td class='valor'>{info['contratos_referencia']}</td>"
@@ -594,15 +616,49 @@ def gerar_secao_portfolio(
     </table>
     """
 
-    cabecalho_corr = "".join(f"<th>{n}</th>" for n in correlacao.columns)
-    linhas_corr = "".join(
-        f"<tr><td class='rotulo'>{a}</td>" + "".join(f"<td class='valor'>{fmt(correlacao.loc[a, b], 3)}</td>" for b in correlacao.columns) + "</tr>"
-        for a in correlacao.index
+    secao_correlacoes = "".join(
+        f'<h4 style="margin-top:16px; font-size:13px;">{rotulo}</h4>{_tabela_correlacao_html(matriz)}'
+        for rotulo, matriz in correlacoes.items()
     )
+
+    linhas_movel = "".join(
+        f"<tr><td class='rotulo'>{par}</td>"
+        f"<td class='valor'>{fmt(serie.min(), 3)}</td>"
+        f"<td class='valor'>{fmt(serie.median(), 3)}</td>"
+        f"<td class='valor'>{fmt(serie.iloc[-1], 3)}</td></tr>"
+        for par, serie in correlacao_movel_df.items()
+    )
+    secao_movel = f"""
+    <h3 style="margin-top:22px; font-size:14px;">Correlação móvel (janela de {janela_movel} pregões)</h3>
+    <p class="nota">Resumo por par -- mínimo/mediana/valor mais recente da correlação recalculada dia a dia sobre a janela.</p>
+    <table>
+      <tr><th>Par</th><th>Mínimo</th><th>Mediana</th><th>Atual</th></tr>
+      {linhas_movel}
+    </table>
+    """
 
     secao_limiar = ""
     if limiar_agregado is not None:
         limiar_ativo = limiar_agregado.get("limiar_recomendado", limiar_agregado["limiar_bruto"])
+        secao_rlt = ""
+        if rlt is not None:
+            secao_rlt = f"""
+            <h3 style="margin-top:22px; font-size:14px;">Retorno sobre o limiar (RLT) do portfólio</h3>
+            <table>
+              <tr><td class="rotulo">RLT acumulado</td><td class="valor">{fmt(rlt['rlt_acumulado']*100)}%</td></tr>
+              <tr><td class="rotulo">RLT anualizado</td><td class="valor">{fmt(rlt['rlt_anualizado']*100)}%</td></tr>
+              <tr><td class="rotulo">RLT mensal médio / mediano</td><td class="valor">{fmt(rlt['rlt_mensal_medio']*100)}% / {fmt(rlt['rlt_mensal_mediano']*100)}%</td></tr>
+              <tr><td class="rotulo">RLT móvel 3 / 6 / 12 meses</td><td class="valor">{fmt(rlt['rlt_movel_3']*100)}% / {fmt(rlt['rlt_movel_6']*100)}% / {fmt(rlt['rlt_movel_12']*100)}%</td></tr>
+            </table>
+            <h3 style="margin-top:22px; font-size:14px;">Risco normalizado pelo limiar (portfólio)</h3>
+            <table>
+              <tr><td class="rotulo">MDD / limiar</td><td class="valor">{fmt(rlt['mdd_sobre_limiar']*100)}%</td></tr>
+              <tr><td class="rotulo">ES95 / limiar</td><td class="valor">{fmt(rlt['es95_sobre_limiar']*100)}%</td></tr>
+              <tr><td class="rotulo">Pior dia / limiar</td><td class="valor">{fmt(rlt['pior_dia_sobre_limiar']*100)}%</td></tr>
+              <tr><td class="rotulo">Pior mês / limiar</td><td class="valor">{fmt(rlt['pior_mes_sobre_limiar']*100)}%</td></tr>
+            </table>
+            <p class="nota">Time Under Water máximo (combinado): {agregadas['tuw_max']} pregões.</p>
+            """
         secao_limiar = f"""
         <h3 style="margin-top:22px; font-size:14px;">Limiar agregado e benefício da diversificação</h3>
         <p class="nota">Calculado sobre a margem SOMADA e o drawdown da série COMBINADA -- não é a soma dos limiares individuais (o PDF-fonte avisa explicitamente para não somar).</p>
@@ -616,9 +672,10 @@ def gerar_secao_portfolio(
           <tr><td class="rotulo"><strong>Limiar agregado do portfólio</strong></td><td class="valor"><strong>{fmt(limiar_ativo, moeda=True)}</strong></td></tr>
           <tr><td class="rotulo"><strong>Benefício da diversificação</strong></td><td class="valor"><strong>{fmt(beneficio['beneficio_rs'], moeda=True)} ({fmt(beneficio['beneficio_pct']*100)}%)</strong></td></tr>
         </table>
+        {secao_rlt}
         """
     else:
-        secao_limiar = '<p class="nota">Margem mínima não informada para todos os robôs -- limiar agregado e benefício da diversificação não calculados.</p>'
+        secao_limiar = '<p class="nota">Margem mínima não informada para todos os robôs -- limiar agregado, RLT e benefício da diversificação não calculados.</p>'
 
     return f"""
     <h2>Portfólio — {len(nomes_robos)} robôs sincronizados</h2>
@@ -628,14 +685,15 @@ def gerar_secao_portfolio(
       <tr><td class="rotulo">Lucro total (combinado)</td><td class="valor">{fmt(agregadas['lucro_total'], moeda=True)}</td></tr>
       <tr><td class="rotulo">Maximum Drawdown (combinado)</td><td class="valor">{fmt(agregadas['mdd'], moeda=True)}</td></tr>
       <tr><td class="rotulo">Expected Shortfall 95% (combinado)</td><td class="valor">{fmt(agregadas['es_95'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Pior dia (combinado)</td><td class="valor">{fmt(agregadas['pior_dia_total'], moeda=True)}</td></tr>
+      <tr><td class="rotulo">Pior mês (combinado)</td><td class="valor">{fmt(agregadas['pior_mes_total'], moeda=True)}</td></tr>
     </table>
-    <h3 style="margin-top:22px; font-size:14px;">Correlação diária entre robôs (pairwise complete observations)</h3>
-    <table>
-      <tr><th></th>{cabecalho_corr}</tr>
-      {linhas_corr}
-    </table>
+    <h3 style="margin-top:22px; font-size:14px;">Correlação entre robôs -- 5 variantes (tarefa 10.4)</h3>
+    <p class="nota">"Piores dias"/"dias de perda"/"volatilidade alta" usam a série COMBINADA do portfólio para definir "dia ruim", não uma recombinação por par (ver docstring de tradefolio.portfolio).</p>
+    {secao_correlacoes}
+    {secao_movel}
     {secao_limiar}
-    <p class="nota">Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, outras variantes de correlação, RLT/custo mensal/Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10).</p>
+    <p class="nota">Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, VLT agregado (precisa de uma política de vapo escolhida para o portfólio), custo mensal/Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10).</p>
     """
 
 
@@ -737,6 +795,11 @@ def _parse_argumentos():
     p_port.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
     p_port.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
     p_port.add_argument("--increment", type=float, default=500.0)
+    p_port.add_argument(
+        "--janela-movel-correlacao", type=int, default=63,
+        help="Janela (pregões) da correlação móvel entre robôs (tarefa 10.4) -- "
+             "63 pregões (~3 meses) por padrão, nem o PDF-fonte especifica um valor.",
+    )
     p_port.add_argument(
         "--dias-recentes-deteccao", type=int, default=90,
         help="Mesma janela de fallback do modo robo, aplicada individualmente a cada robô "
@@ -882,8 +945,16 @@ def _rodar_modo_portfolio(args):
         raise SystemExit("Modo portfolio exige ao menos 2 robôs (--robo repetido 2+ vezes).")
 
     largo = sincronizar_portfolio(diarios)
+    operou = sincronizar_operou(diarios)
     agregadas = metricas_agregadas(largo)
-    correlacao = correlacao_portfolio(largo)
+    correlacoes = {
+        "Todos os dias": correlacao_portfolio(largo),
+        "Dias em que todos operaram": correlacao_dias_conjuntos(largo, operou),
+        "Piores 20% dias (combinado)": correlacao_piores_dias(largo, fracao=0.20),
+        "Dias de perda (combinado)": correlacao_perdas(largo),
+        "Volatilidade alta (combinado)": correlacao_volatilidade_alta(largo, janela=21, fracao=0.20),
+    }
+    correlacao_movel_df = correlacao_movel(largo, janela_pregoes=args.janela_movel_correlacao)
 
     limiar_agregado = limiar_agregado_portfolio(
         largo, minimum_margins, percentil_cauda=args.percentil_cauda,
@@ -892,9 +963,11 @@ def _rodar_modo_portfolio(args):
     soma_individuais = sum(limiares_individuais.values())
     limiar_agregado_ativo = limiar_agregado.get("limiar_recomendado", limiar_agregado["limiar_bruto"])
     beneficio = beneficio_diversificacao(soma_individuais, limiar_agregado_ativo)
+    rlt = rlt_e_risco_portfolio(largo, limiar=limiar_agregado_ativo)
 
     secao_portfolio = gerar_secao_portfolio(
-        resumo_robos, agregadas, correlacao, limiar_agregado, soma_individuais, beneficio, sorted(diarios),
+        resumo_robos, agregadas, correlacoes, correlacao_movel_df, args.janela_movel_correlacao,
+        limiar_agregado, soma_individuais, beneficio, rlt, sorted(diarios),
     )
     html_portfolio = gerar_html_portfolio(secao_portfolio)
 

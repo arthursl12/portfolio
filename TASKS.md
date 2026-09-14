@@ -633,37 +633,56 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   funcional de "suportar multiplicadores" (a dataclass é só o registro).
 
 ### Tarefa 10.3 — Calcular métricas agregadas
-- [x] `portfolio.metricas_agregadas(largo)` -- lucro total, MDD, ES95
-  sobre a série COMBINADA (`serie_combinada`, soma com `skipna=True`:
-  um robô ainda inexistente contribui 0, não contamina o total com
-  NaN). Reusa `drawdowns`/`metrics` diretamente.
-- [ ] Margem total, TUW, lucro mensal, custo total agregados -- não
-  montados como parte de `metricas_agregadas` nesta rodada (margem é só
-  `sum(minimum_margins.values())`, já usada dentro de
-  `limiar_agregado_portfolio`; TUW/lucro mensal/custo total comporiam
-  diretamente com `drawdowns.time_under_water_max`/`monthly.agregar_mensal`
-  sobre `serie_combinada`, mesmo padrão, só não foram adicionados ainda).
-- [ ] RLT — composição direta de `limiar.rlt_*` sobre `serie_combinada` e
-  o limiar agregado (10.6, já existe) -- não montada como parte de
-  `metricas_agregadas` nesta rodada.
-- [ ] VLT — não mais bloqueado (Épico 7/vapo existe), mas precisaria
-  compor `vapo.gerar_serie_vapo` sobre a série mensal COMBINADA com uma
-  política e alíquota escolhidas -- não montado nesta rodada.
+- [x] `portfolio.metricas_agregadas(largo)` -- lucro total, MDD, ES95,
+  TUW máximo, pior dia, pior mês e lucro mensal (Series), tudo sobre a
+  série COMBINADA (`serie_combinada`, soma com `skipna=True`: um robô
+  ainda inexistente contribui 0, não contamina o total com NaN). `lucro
+  mensal` é `serie_combinada.resample("ME").sum()`, NÃO
+  `monthly.agregar_mensal` -- essa exige `bruto`/`custo`/`n_trades`/
+  `liquido_por_contrato`, colunas sem significado agregado coerente
+  entre robôs heterogêneos (inventar valores violaria AGENTS.md §8).
+  Reusa `drawdowns`/`metrics` diretamente, nenhuma fórmula nova.
+- [x] `portfolio.rlt_e_risco_portfolio(largo, limiar)` -- RLT acumulado/
+  anualizado/mensal médio-mediano/móvel 3-6-12m e risco normalizado
+  (MDD/ES95/pior dia/pior mês sobre o limiar), mesma forma de
+  `report_data.calcular_pagina4` mas sobre a série combinada; recebe o
+  limiar agregado já decidido (não recalcula). Verificado contra dados
+  reais (resgat+gridhedge+romanos2, R$5.000/contrato, limiar agregado
+  R$52.500): RLT acumulado 122,52%, anualizado 49,23%.
+- [x] Margem total -- decisão: não virou função própria (é um
+  `sum(minimum_margins.values())` de uma linha, já usado dentro de
+  `limiar_agregado_portfolio`; uma função só para isso seria abstração
+  sem necessidade, AGENTS.md).
+- [ ] Custo total agregado -- ainda bloqueado por custo mensal não estar
+  wireado no modo Portfólio (mesma lacuna já documentada em "UI wiring"
+  abaixo).
+- [ ] VLT — não mais bloqueado tecnicamente (Épico 7/vapo existe), mas
+  precisaria compor `vapo.gerar_serie_vapo` sobre `lucro_mensal` com uma
+  política e alíquota escolhidas para o PORTFÓLIO -- decisão de
+  convenção nova, não tomada nesta rodada (nem pedida explicitamente).
 
 ### Tarefa 10.4 — Calcular correlações múltiplas
-- [x] `portfolio.correlacao_portfolio(largo)` = `largo.corr()` -- mesma
-  fórmula de `report_data.calcular_pagina6`, generalizada de
-  ativos-dentro-de-um-robô para robôs-dentro-de-um-portfólio. `.corr()`
-  do pandas já usa só as datas em que AMBOS os robôs têm dado (pairwise
-  complete observations) -- o comportamento certo para robôs com
-  históricos de tamanhos diferentes, sem precisar excluir nada à mão.
-  Verificado contra dados reais.
-- [ ] As outras 3 variantes (dias em que ambos operaram; piores 20%; alta
-  volatilidade) são EXATAMENTE a mesma lacuna já documentada para
-  `calcular_pagina6` (ver seção "Lâmina ideal.pdf — wiring" abaixo) --
-  não uma ambiguidade nova deste épico.
-- [ ] Correlação móvel (janela deslizante) — não implementada nesta
-  rodada.
+- [x] **Completa** -- 6 variantes (lâmina ideal.pdf §13 pede "pelo menos
+  4"; tarefas e épicos.pdf soma "correlação de perdas" e "correlação
+  móvel" às mesmas 4):
+  1. `correlacao_portfolio(largo)` = `largo.corr()` -- todos os dias.
+  2. `correlacao_dias_conjuntos(largo, sincronizar_operou(diarios))` --
+     só datas em que TODOS os robôs operaram (não apenas existiam).
+  3. `correlacao_piores_dias(largo, fracao=0.20)` -- piores `fracao`
+     dias pela série COMBINADA (decisão de design documentada no
+     docstring do módulo: não uma recombinação por par).
+  4. `correlacao_volatilidade_alta(largo, janela=21, fracao=0.20)` --
+     top `fracao` dias por desvio-padrão móvel (`janela` pregões) da
+     série combinada. Nem PDF-fonte especifica janela/fração para "alta
+     volatilidade" -- ambas expostas como parâmetro, não hardcoded.
+  5. `correlacao_perdas(largo)` -- só datas com série combinada < 0.
+  6. `correlacao_movel(largo, janela_pregoes)` -- correlação par-a-par
+     recalculada dia a dia sobre uma janela deslizante, genérica sobre a
+     janela (mesmo padrão de `limiar.rlt_movel`), uma coluna por par.
+  Todas verificadas contra dados reais antes dos testes (ex.: correlação
+  resgat×gridhedge cai de 0,069 "todos os dias" para -0,41 "piores 20%
+  dias" -- diversificação de fato melhora nos dias ruins deste
+  portfólio, não piora).
 
 ### Tarefa 10.5 — Calcular contribuição marginal
 - [ ] Não implementada nesta rodada. Para cada robô: recomputar o
@@ -724,6 +743,19 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
 - [ ] Custo mensal/janela de filtro/Monte Carlo por robô dentro do modo
   Portfólio não implementados (fora do escopo funcional desta primeira
   fatia do Épico 10, ver tarefa 10.3 acima).
+- [x] Tarefa 10.4 completa (6 variantes) + extensão de 10.3 (RLT/risco/
+  TUW/pior dia/pior mês/lucro mensal) wireadas em ambas as UIs. `app.py`:
+  expander "Correlação entre robôs" ganhou um seletor de variante (radio)
+  + parâmetro de janela quando aplicável, e uma subseção "Correlação
+  móvel" com `st.line_chart`; o expander "Limiar agregado" ganhou os
+  blocos RLT/risco normalizado (só quando toda margem foi informada,
+  mesma condição já usada para o limiar agregado). `report.py`: todas as
+  6 variantes aparecem lado a lado no HTML estático (não um seletor --
+  relatório estático mostra tudo); correlação móvel resumida por par
+  (mínimo/mediana/atual) em vez de despejada linha a linha; novo flag
+  `--janela-movel-correlacao` (padrão 63 pregões). Verificado via
+  `AppTest` e execução real do CLI -- números idênticos entre as duas
+  UIs e a `tests/test_portfolio.py`.
 
 ### Tarefa 10.8 — Otimização de portfólio
 - [ ] Busca discreta (não otimização contínua, conforme o PDF-fonte pede

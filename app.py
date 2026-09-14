@@ -35,9 +35,16 @@ from tradefolio.loaders import carregar_ordens
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
     beneficio_diversificacao,
+    correlacao_dias_conjuntos,
+    correlacao_movel,
+    correlacao_perdas,
+    correlacao_piores_dias,
     correlacao_portfolio,
+    correlacao_volatilidade_alta,
     limiar_agregado_portfolio,
     metricas_agregadas,
+    rlt_e_risco_portfolio,
+    sincronizar_operou,
     sincronizar_portfolio,
 )
 from tradefolio.report_data import (
@@ -301,12 +308,48 @@ def rodar_modo_portfolio():
     colp2.metric("Maximum Drawdown (combinado)", fmt(agregadas["mdd"], moeda=True))
     colp3.metric("Expected Shortfall 95% (combinado)", fmt(agregadas["es_95"], moeda=True))
 
+    operou = sincronizar_operou(diarios)
+
     with st.expander("Correlação entre robôs"):
+        variante = st.radio(
+            "Variante", [
+                "Todos os dias", "Dias em que todos operaram", "Piores 20% dias (combinado)",
+                "Dias de perda (combinado)", "Volatilidade alta (combinado)",
+            ],
+            key="portfolio_variante_correlacao",
+            help="lâmina ideal.pdf §13 pede pelo menos 4 variantes -- 'piores dias'/'perda'/"
+                 "'volatilidade alta' usam a série COMBINADA do portfólio para definir "
+                 "'dia ruim', não uma recombinação por par (ver docstring de tradefolio.portfolio).",
+        )
+        if variante == "Todos os dias":
+            matriz = correlacao
+        elif variante == "Dias em que todos operaram":
+            matriz = correlacao_dias_conjuntos(largo, operou)
+        elif variante == "Piores 20% dias (combinado)":
+            matriz = correlacao_piores_dias(largo, fracao=0.20)
+        elif variante == "Dias de perda (combinado)":
+            matriz = correlacao_perdas(largo)
+        else:
+            janela_vol = st.number_input(
+                "Janela de volatilidade (pregões)", min_value=5, max_value=252, value=21, step=1,
+                key="portfolio_janela_vol",
+            )
+            matriz = correlacao_volatilidade_alta(largo, janela=int(janela_vol), fracao=0.20)
         st.caption(
             "Correlação de Pearson par-a-par (pairwise complete observations -- cada par usa só "
-            "as datas em que ambos os robôs já existiam)."
+            "as datas em que ambos os robôs têm dado dentro do subconjunto da variante escolhida)."
         )
-        st.dataframe(correlacao)
+        st.dataframe(matriz)
+
+        st.subheader("Correlação móvel")
+        janela_movel = st.number_input(
+            "Janela (pregões)", min_value=5, max_value=252, value=63, step=1,
+            key="portfolio_janela_movel",
+            help="Correlação par-a-par recalculada dia a dia sobre esta janela deslizante -- "
+                 "os primeiros dias de cada par ficam vazios até a janela completar.",
+        )
+        movel = correlacao_movel(largo, janela_pregoes=int(janela_movel))
+        st.line_chart(movel)
 
     if len(minimum_margins) == len(diarios):
         limiar_agregado = limiar_agregado_portfolio(
@@ -340,6 +383,24 @@ def rodar_modo_portfolio():
                 "Benefício da diversificação",
                 f"{fmt(beneficio['beneficio_rs'], moeda=True)} ({fmt(beneficio['beneficio_pct'] * 100)}%)",
             )
+
+            rlt = rlt_e_risco_portfolio(largo, limiar=limiar_agregado_ativo)
+            st.subheader("Retorno sobre o limiar (RLT) do portfólio")
+            colr1, colr2 = st.columns(2)
+            colr1.metric("RLT acumulado", fmt(rlt["rlt_acumulado"] * 100) + "%")
+            colr2.metric("RLT anualizado", fmt(rlt["rlt_anualizado"] * 100) + "%")
+            st.caption(
+                f"RLT mensal médio/mediano: {fmt(rlt['rlt_mensal_medio']*100)}% / {fmt(rlt['rlt_mensal_mediano']*100)}% · "
+                f"RLT móvel 3/6/12 meses: {fmt(rlt['rlt_movel_3']*100)}% / {fmt(rlt['rlt_movel_6']*100)}% / {fmt(rlt['rlt_movel_12']*100)}%"
+            )
+
+            st.subheader("Risco normalizado pelo limiar (portfólio)")
+            colrr1, colrr2, colrr3, colrr4 = st.columns(4)
+            colrr1.metric("MDD / limiar", fmt(rlt["mdd_sobre_limiar"] * 100) + "%")
+            colrr2.metric("ES95 / limiar", fmt(rlt["es95_sobre_limiar"] * 100) + "%")
+            colrr3.metric("Pior dia / limiar", fmt(rlt["pior_dia_sobre_limiar"] * 100) + "%")
+            colrr4.metric("Pior mês / limiar", fmt(rlt["pior_mes_sobre_limiar"] * 100) + "%")
+            st.caption(f"Time Under Water máximo (combinado): {agregadas['tuw_max']} pregões.")
     else:
         st.info(
             "Informe a margem mínima de cada robô na barra lateral para calcular o limiar agregado "
@@ -347,9 +408,10 @@ def rodar_modo_portfolio():
         )
 
     st.caption(
-        "Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, outras "
-        "variantes de correlação, RLT/custo mensal/Monte Carlo agregados, otimização de pesos. "
-        "Ver TASKS.md (Épico 10) para o que cada um exigiria."
+        "Fora de escopo nesta versão do modo Portfólio: contribuição marginal por robô, VLT "
+        "agregado (precisa de uma política de vapo escolhida para o portfólio), custo mensal/"
+        "Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10) para o que cada "
+        "um exigiria."
     )
 
 
