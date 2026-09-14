@@ -5,8 +5,8 @@ Convenção testada (AGENTS.md épico 0, tarefa 0.3 "versionar a
 metodologia"): cada etapa do pipeline que já existe tem uma tag de versão
 própria (para poder ser referenciada por tradefolio.metric_registry e,
 futuramente, pela camada de proveniência exposta à IA). Etapas que ainda
-não existem (portfólio, score, alertas) ficam explicitamente None --
-não recebem uma versão inventada só para preencher a tabela.
+não existem (score, alertas) ficam explicitamente None -- não recebem
+uma versão inventada só para preencher a tabela.
 """
 from tradefolio.versions import VERSOES
 
@@ -26,10 +26,10 @@ ETAPAS_IMPLEMENTADAS = (
     "vapo",
     "monte_carlo",
     "deterioracao",
+    "portfolio",
 )
 
 ETAPAS_NAO_IMPLEMENTADAS = (
-    "portfolio",
     "score",
     "alertas",
 )

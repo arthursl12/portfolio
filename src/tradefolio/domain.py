@@ -14,9 +14,17 @@ for a system that doesn't exist):
 - Order/DailyResult/MonthlyResult -- already well-represented by the
   existing DataFrames (tradefolio.loaders/daily/monthly); wrapping them now
   would duplicate data with no new capability.
-- ThresholdPolicy/WithdrawalPolicy -- Épicos 6/7 don't exist.
-- Portfolio/PortfolioAllocation -- Épico 10 doesn't exist.
-- SimulationRun -- Épico 8 doesn't exist.
+- ThresholdPolicy/WithdrawalPolicy -- tradefolio.limiar/tradefolio.vapo
+  implement the actual formulas (épicos 6/7); no dataclass wraps a
+  chosen policy as a named, storable record yet.
+- Portfolio -- tradefolio.portfolio (épico 10) has the functional
+  pipeline (sincronizar_portfolio, limiar_agregado_portfolio, etc.); no
+  dataclass records "which robots, at which weights" as a named,
+  storable portfolio yet (PortfolioAllocation below records one robot's
+  allocation, not the whole named collection).
+- SimulationRun -- tradefolio.monte_carlo (épico 8) has the functional
+  pipeline; no dataclass records "which simulation, with which
+  parameters" as a stored/citable run yet.
 """
 from __future__ import annotations
 
@@ -140,3 +148,16 @@ class MetricResult:
     value: float
     origem: str
     analysis_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PortfolioAllocation:
+    """Um robô dentro de um portfólio (AGENTS.md épico 10, tarefa 10.2):
+    quanto dele (`multiplier`, escala o `liquido` -- ver
+    `tradefolio.portfolio.sincronizar_portfolio`) e desde quando. Registra
+    UMA alocação; um portfólio nomeado (a coleção inteira) ainda não tem
+    dataclass própria (ver docstring do módulo)."""
+
+    strategy_id: str
+    multiplier: float
+    active_from: date

@@ -603,82 +603,91 @@ depender do Épico 8; 9.3/9.4 dependem do motor de Monte Carlo existir.
 
 ## Épico 10 — Portfólio
 
-Nada implementado — o maior gap arquitetural encontrado até agora: todo
-`tradefolio.*` opera sobre UM `ordens`/`diario` por vez; não existe
-nenhum conceito de carregar e sincronizar múltiplos robôs simultaneamente.
-`domain.py` já lista `Portfolio`/`PortfolioAllocation` como deliberadamente
-não implementados por dependerem deste épico (Épico 2, tarefa 2.1).
-`VERSOES["portfolio"]` já existe como `None` (tarefa 0.3). Tarefa 10.1 é
-pré-requisito de tudo o resto do épico.
+Tarefas 10.1/10.2/10.6/10.7, e parte de 10.3/10.4, implementadas em
+`src/tradefolio/portfolio.py` -- o maior gap arquitetural do projeto até
+esta rodada (todo `tradefolio.*` operava sobre UM `ordens`/`diario` por
+vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
 
 ### Tarefa 10.1 — Sincronizar estratégias por data
-- [ ] Carregar N `ordens`/`diario` (um por robô) e alinhá-los num índice
-  de datas comum, distinguindo por (robô, data): não operou (já existe,
-  `operou=False`), robô não existia ainda naquela data (série daquele
-  robô não cobre essa data) e dado ausente (MISSING_DATA -- mesma lacuna
-  já documentada como não implementada em `alignment.py` por falta de um
-  sinal independente, tarefa 3.3; agora relevante em escala de
-  portfólio, onde esse sinal passaria a existir: um robô ausente do
-  portfólio quando outros do mesmo período têm dado é evidência de
-  MISSING_DATA, não de NO_TRADE).
-- [ ] Lugar natural: generalizar o padrão de
-  `daily.pivotar_liquido_por_ativo` (hoje "por ativo dentro de um robô")
-  para "por robô dentro de um portfólio" -- mesmo reshape, escopo maior.
+- [x] `portfolio.sincronizar_portfolio({nome: diario, ...})` — generaliza
+  o padrão de `daily.pivotar_liquido_por_ativo` (por ativo dentro de um
+  robô) para "por robô dentro de um portfólio". `pd.DataFrame({nome:
+  diario["liquido"], ...})` já faz o alinhamento certo sozinho: pandas
+  une os índices e preenche com NaN onde um robô não tem dado -- não
+  com 0 (que já significa NO_TRADE dentro do range de vida daquele
+  robô). Distingue "não operou" (0) de "ainda não existia" (NaN) sem
+  nenhuma lógica nova. Verificado contra dados reais (resgat + gridhedge
+  + romanos2, começos em datas diferentes): antes de gridhedge/romanos2
+  existirem, as colunas deles são `NaN`, não `0`.
+- [ ] MISSING_DATA continua não implementado -- mesma lacuna da tarefa
+  3.3 (falta um sinal independente); "robô ausente quando outros do
+  mesmo período têm dado" SERIA esse sinal, mas não foi usado para
+  inferir MISSING_DATA nesta rodada (ficaria indistinguível de "ainda
+  não existia" por enquanto).
 
 ### Tarefa 10.2 — Suportar quantidades e multiplicadores
-- [ ] `PortfolioAllocation(strategy_id, multiplier, active_from)` — mapeia
-  quase 1:1 sobre `StrategyConfiguration` (`domain.py`, já resolvido no
-  Épico 2 com `valid_from`/`valid_to`); seria um dataclass irmão, não uma
-  reformulação do que já existe.
+- [x] `PortfolioAllocation(strategy_id, multiplier, active_from)` em
+  `domain.py` -- dataclass irmão de `StrategyConfiguration`.
+- [x] `sincronizar_portfolio(..., multiplicadores={"robo": fator, ...})`
+  escala o `liquido` de cada robô ANTES de sincronizar -- a parte
+  funcional de "suportar multiplicadores" (a dataclass é só o registro).
 
 ### Tarefa 10.3 — Calcular métricas agregadas
-- [ ] P&L, margem, MDD, ES, TUW, lucro mensal, custo total — a fórmula de
-  cada uma já existe (`drawdowns.py`/`metrics.py`/`monthly.py`); a única
-  coisa nova é aplicá-las à série COMBINADA das estratégias sincronizadas
-  (10.1), não somar as métricas individuais (MDD de uma soma de séries
-  não é a soma dos MDDs individuais).
-- [ ] RLT — mesma composição de `limiar.rlt_*`, uma vez que exista um
-  limiar agregado (tarefa 10.6).
-- [ ] VLT — bloqueado pelo Épico 7 (vapo não existe).
+- [x] `portfolio.metricas_agregadas(largo)` -- lucro total, MDD, ES95
+  sobre a série COMBINADA (`serie_combinada`, soma com `skipna=True`:
+  um robô ainda inexistente contribui 0, não contamina o total com
+  NaN). Reusa `drawdowns`/`metrics` diretamente.
+- [ ] Margem total, TUW, lucro mensal, custo total agregados -- não
+  montados como parte de `metricas_agregadas` nesta rodada (margem é só
+  `sum(minimum_margins.values())`, já usada dentro de
+  `limiar_agregado_portfolio`; TUW/lucro mensal/custo total comporiam
+  diretamente com `drawdowns.time_under_water_max`/`monthly.agregar_mensal`
+  sobre `serie_combinada`, mesmo padrão, só não foram adicionados ainda).
+- [ ] RLT — composição direta de `limiar.rlt_*` sobre `serie_combinada` e
+  o limiar agregado (10.6, já existe) -- não montada como parte de
+  `metricas_agregadas` nesta rodada.
+- [ ] VLT — não mais bloqueado (Épico 7/vapo existe), mas precisaria
+  compor `vapo.gerar_serie_vapo` sobre a série mensal COMBINADA com uma
+  política e alíquota escolhidas -- não montado nesta rodada.
 
 ### Tarefa 10.4 — Calcular correlações múltiplas
-- [ ] "Correlação geral" é a mesma fórmula já usada em
-  `report_data.calcular_pagina6` (Pearson sobre séries diárias
-  sincronizadas), generalizada de ativos-dentro-de-um-robô para
-  robôs-dentro-de-um-portfólio -- reuso direto do padrão, não uma fórmula
-  nova.
-- [ ] As outras 4 variantes (dias em que ambos operaram; piores 20%; alta
-  volatilidade; perdas) são EXATAMENTE a mesma lacuna já documentada para
-  `calcular_pagina6` (ver seção "Lâmina ideal.pdf — wiring" abaixo): cada
-  uma exige decidir uma convenção extra (o que conta como "dia ruim"? qual
-  limiar de volatilidade?) antes de codificar. Não é uma ambiguidade nova
-  deste épico -- é a mesma adiada antes, reaparecendo em escala de
-  portfólio.
-- [ ] Correlação móvel (janela deslizante) — nova, mas mecânica uma vez
-  que a correlação geral (par a par) exista.
+- [x] `portfolio.correlacao_portfolio(largo)` = `largo.corr()` -- mesma
+  fórmula de `report_data.calcular_pagina6`, generalizada de
+  ativos-dentro-de-um-robô para robôs-dentro-de-um-portfólio. `.corr()`
+  do pandas já usa só as datas em que AMBOS os robôs têm dado (pairwise
+  complete observations) -- o comportamento certo para robôs com
+  históricos de tamanhos diferentes, sem precisar excluir nada à mão.
+  Verificado contra dados reais.
+- [ ] As outras 3 variantes (dias em que ambos operaram; piores 20%; alta
+  volatilidade) são EXATAMENTE a mesma lacuna já documentada para
+  `calcular_pagina6` (ver seção "Lâmina ideal.pdf — wiring" abaixo) --
+  não uma ambiguidade nova deste épico.
+- [ ] Correlação móvel (janela deslizante) — não implementada nesta
+  rodada.
 
 ### Tarefa 10.5 — Calcular contribuição marginal
-- [ ] Para cada robô: recomputar o portfólio inteiro com e sem aquele
-  robô (10.1–10.4) e diferenciar lucro/MDD/ES — mecânico uma vez que 10.1
-  exista, mas caro computacionalmente (N+1 recomputações completas para N
-  robôs; não otimizar prematuramente antes de medir).
-- [ ] Diferença de limiar/VLT — herdam as dependências de 10.6 e do
-  Épico 7 (VLT), respectivamente.
+- [ ] Não implementada nesta rodada. Para cada robô: recomputar o
+  portfólio inteiro com e sem aquele robô (10.1–10.4) e diferenciar
+  lucro/MDD/ES — mecânico uma vez que 10.1/10.3 já existam, mas caro
+  computacionalmente (N+1 recomputações completas para N robôs; medir
+  antes de otimizar).
 
 ### Tarefa 10.6 — Calcular limiar agregado
-- [ ] Fórmula dada explicitamente pelo PDF-fonte: `portfolio_threshold =
-  total_minimum_margin + portfolio_tail_drawdown + uncertainty_premium +
-  operational_reserve` — literalmente a mesma assinatura de
-  `limiar.decompor_limiar`, só que alimentada pela margem mínima somada e
-  pelo `drawdown_serie` da série COMBINADA (10.1/10.3) em vez de um único
-  robô. Reuso direto, sem fórmula nova. O PDF-fonte avisa explicitamente
-  para NÃO somar os limiares individuais -- o resultado agregado usa a
-  MESMA função, só que sobre dados diferentes.
+- [x] `portfolio.limiar_agregado_portfolio(largo, minimum_margins, ...)`
+  — literalmente `limiar.decompor_limiar` (a MESMA função do robô
+  único), alimentada pela margem mínima SOMADA e pelo drawdown da série
+  COMBINADA. O PDF-fonte avisa para NÃO somar os limiares individuais --
+  aqui não se soma nada, `decompor_limiar` calcula um limiar novo a
+  partir dos dados agregados. Verificado contra dados reais (resgat +
+  gridhedge + romanos2, R$5.000 de margem cada): limiar agregado
+  R$19.500 vs. soma dos limiares individuais R$25.500 -- um benefício de
+  diversificação real de R$6.000.
 
 ### Tarefa 10.7 — Calcular benefício da diversificação
-- [ ] `soma dos limiares individuais - limiar agregado (10.6)`, em R$ e
-  em % — trivial uma vez que 10.6 e a soma dos limiares individuais
-  existam; nenhuma fórmula nova.
+- [x] `portfolio.beneficio_diversificacao(soma_limiares_individuais,
+  limiar_agregado)` — `soma - agregado`, em R$ e em % da soma. Trivial,
+  nenhuma fórmula nova. Verificado com o exemplo real de 10.6 (R$6.000,
+  23,5% da soma individual).
 
 ### Tarefa 10.8 — Otimização de portfólio
 - [ ] Busca discreta (não otimização contínua, conforme o PDF-fonte pede

@@ -38,6 +38,7 @@ from tradefolio.domain import (
     AnalysisRun,
     DataQualityIssue,
     MetricResult,
+    PortfolioAllocation,
     PositionLeg,
     Strategy,
     StrategyConfiguration,
@@ -63,6 +64,13 @@ def _ordens_win_e_wdo_estaveis(tmp_path: Path) -> pd.DataFrame:
     caminho = tmp_path / "win_wdo.csv"
     caminho.write_text(CABECALHO + "\n" + "\n".join(linhas) + "\n", encoding="utf-8")
     return carregar_ordens(caminho)
+
+
+def test_portfolio_allocation_e_container_simples():
+    alocacao = PortfolioAllocation(strategy_id="romanos", multiplier=1.5, active_from=date(2026, 1, 1))
+    assert alocacao.strategy_id == "romanos"
+    assert alocacao.multiplier == 1.5
+    assert alocacao.active_from == date(2026, 1, 1)
 
 
 def test_position_leg_e_strategy_sao_containers_simples():
