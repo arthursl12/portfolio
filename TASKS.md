@@ -699,10 +699,28 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   informada). Verificado via `streamlit.testing.v1.AppTest` com resgat +
   gridhedge + romanos2 -- números idênticos aos de `test_portfolio.py`.
 - [x] `report.py`: CLI virou subcomandos (`robo` = comportamento
-  original inalterado; `portfolio` = novo, `--robo CSV MARGEM` repetido
-  2+ vezes) gerando um HTML próprio (`gerar_html_portfolio`/
+  original inalterado; `portfolio` = novo, `--robo CSV MARGEM N_CONTRATOS`
+  repetido 2+ vezes) gerando um HTML próprio (`gerar_html_portfolio`/
   `gerar_secao_portfolio`), sem página 1-6 de robô único. Verificado via
   execução real com os mesmos três CSVs -- números idênticos.
+- [x] Pedido de acompanhamento do usuário: margem por robô no modo
+  Portfólio é POR CONTRATO (não posição total, diferente do modo robo
+  único) e cada robô tem um "número de contratos simulado no portfólio"
+  próprio (independente do `contratos_referencia` detectado no CSV) —
+  para permitir testar dimensionamentos diferentes sem reinformar a
+  margem. `diario['liquido']` de cada robô é reescalado
+  (`liquido_por_contrato × n_contratos`, mesma convenção linear de
+  `daily.escalar_por_contratos`) ANTES de sincronizar e antes de calcular
+  o limiar individual (mesma base de comparação para "soma dos limiares
+  individuais" vs. agregado). Uma tabela de composição (contratos de
+  referência, contratos simulados, margem/contrato, margem total por
+  robô) aparece em ambas as UIs. Verificado: dobrar `n_contratos` de um
+  robô (resgat 6→12) dobra exatamente sua contribuição ao lucro
+  combinado (34.974,00→69.948,00; total combinado 99.294,93) em
+  `app.py`; CLI reproduz os mesmos agregados de antes quando
+  `n_contratos` = referência detectada. Nenhuma fórmula nova em
+  `tradefolio.portfolio` -- só reescala o `diario` de entrada antes de
+  chamar as mesmas funções (AGENTS.md §16/17).
 - [ ] Custo mensal/janela de filtro/Monte Carlo por robô dentro do modo
   Portfólio não implementados (fora do escopo funcional desta primeira
   fatia do Épico 10, ver tarefa 10.3 acima).

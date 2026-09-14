@@ -568,12 +568,32 @@ def gerar_html(
 
 
 def gerar_secao_portfolio(
-    agregadas: dict, correlacao, limiar_agregado: dict | None, soma_individuais: float | None,
-    beneficio: dict | None, nomes_robos: list,
+    resumo_robos: dict, agregadas: dict, correlacao, limiar_agregado: dict | None,
+    soma_individuais: float | None, beneficio: dict | None, nomes_robos: list,
 ) -> str:
-    """Portfólio agregado (AGENTS.md épico 10) -- métricas combinadas,
-    correlação par-a-par e (quando toda margem individual foi informada)
-    limiar agregado + benefício da diversificação."""
+    """Portfólio agregado (AGENTS.md épico 10) -- composição (contratos e
+    margem por robô), métricas combinadas, correlação par-a-par e
+    limiar agregado + benefício da diversificação. Margem é POR CONTRATO
+    aqui (pedido do usuário, para testar dimensionamentos diferentes sem
+    reinformar a margem toda vez) -- diferente do modo robo único (posição
+    total); margem total de cada robô = margem/contrato × contratos
+    simulados, já refletida em `resumo_robos`."""
+    linhas_composicao = "".join(
+        f"<tr><td class='rotulo'>{nome}</td>"
+        f"<td class='valor'>{info['contratos_referencia']}</td>"
+        f"<td class='valor'>{info['n_contratos']}</td>"
+        f"<td class='valor'>{fmt(info.get('margem_por_contrato'), moeda=True)}</td>"
+        f"<td class='valor'>{fmt(info.get('margem_total'), moeda=True)}</td></tr>"
+        for nome, info in resumo_robos.items()
+    )
+    secao_composicao = f"""
+    <h3 style="margin-top:22px; font-size:14px;">Composição do portfólio</h3>
+    <table>
+      <tr><th>Robô</th><th>Contratos de referência (detectado)</th><th>Contratos simulados</th><th>Margem/contrato</th><th>Margem total</th></tr>
+      {linhas_composicao}
+    </table>
+    """
+
     cabecalho_corr = "".join(f"<th>{n}</th>" for n in correlacao.columns)
     linhas_corr = "".join(
         f"<tr><td class='rotulo'>{a}</td>" + "".join(f"<td class='valor'>{fmt(correlacao.loc[a, b], 3)}</td>" for b in correlacao.columns) + "</tr>"
@@ -603,6 +623,7 @@ def gerar_secao_portfolio(
     return f"""
     <h2>Portfólio — {len(nomes_robos)} robôs sincronizados</h2>
     <p class="nota">Robôs: {', '.join(nomes_robos)}. Datas em que um robô ainda não existia contam como ausentes (NaN) na sincronização, não como zero -- só dias em que o robô já existia mas não operou contam como zero.</p>
+    {secao_composicao}
     <table>
       <tr><td class="rotulo">Lucro total (combinado)</td><td class="valor">{fmt(agregadas['lucro_total'], moeda=True)}</td></tr>
       <tr><td class="rotulo">Maximum Drawdown (combinado)</td><td class="valor">{fmt(agregadas['mdd'], moeda=True)}</td></tr>
@@ -705,10 +726,13 @@ def _parse_argumentos():
     p_port = sub.add_parser("portfolio", help="Lâmina agregada de portfólio (2+ robôs, AGENTS.md épico 10)")
     p_port.add_argument("output_path", help="Caminho do HTML a gerar")
     p_port.add_argument(
-        "--robo", dest="robos", action="append", nargs=2, metavar=("CSV", "MARGEM"), required=True,
-        help="Repita para cada robô do portfólio: --robo caminho.csv margem_minima "
-             "(margem SEMPRE obrigatória aqui -- sem ela não dá para calcular o limiar agregado, "
-             "AGENTS.md §8: nunca inventar)",
+        "--robo", dest="robos", action="append", nargs=3,
+        metavar=("CSV", "MARGEM_POR_CONTRATO", "N_CONTRATOS"), required=True,
+        help="Repita para cada robô do portfólio: --robo caminho.csv margem_por_contrato n_contratos "
+             "-- margem é POR CONTRATO (diferente do modo robo, que pede a margem da posição total) e "
+             "n_contratos é quantos contratos DESSE robô entram no portfólio (não precisa ser o "
+             "número de referência detectado no CSV -- é o que permite testar outros dimensionamentos "
+             "sem reinformar a margem). Ambos sempre obrigatórios -- AGENTS.md §8: nunca inventar.",
     )
     p_port.add_argument("--percentil-cauda", type=int, choices=(95, 99), default=95)
     p_port.add_argument("--fracao-reserva-operacional", type=float, default=0.0)
@@ -811,10 +835,12 @@ def _rodar_modo_portfolio(args):
     diarios = {}
     minimum_margins = {}
     limiares_individuais = {}
+    resumo_robos = {}
 
-    for csv_path, margem_str in args.robos:
+    for csv_path, margem_por_contrato_str, n_contratos_str in args.robos:
         nome_robo = csv_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        margem = float(margem_str)
+        margem_por_contrato = float(margem_por_contrato_str)
+        n_contratos_robo = int(n_contratos_str)
         ordens = carregar_ordens(csv_path)
         try:
             contratos_referencia = detectar_contratos_referencia(ordens)
@@ -827,11 +853,27 @@ def _rodar_modo_portfolio(args):
                 f"sobre os últimos {args.dias_recentes_deteccao} dias: {composicao} (total {contratos_referencia})."
             )
         diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
-        diarios[nome_robo] = diario
-        minimum_margins[nome_robo] = margem
+
+        # Reescala o robô inteiro para n_contratos_robo (não só a margem) --
+        # mesma convenção linear de tradefolio.daily.escalar_por_contratos,
+        # aplicada ao liquido (escala TOTAL) via liquido_por_contrato --
+        # tanto o limiar individual quanto a sincronização usam o robô já
+        # no tamanho simulado, para a comparação ficar na mesma base.
+        diario_simulado = diario.copy()
+        diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos_robo
+        diarios[nome_robo] = diario_simulado
+
+        margem_total = margem_por_contrato * n_contratos_robo
+        minimum_margins[nome_robo] = margem_total
+        resumo_robos[nome_robo] = {
+            "contratos_referencia": contratos_referencia,
+            "n_contratos": n_contratos_robo,
+            "margem_por_contrato": margem_por_contrato,
+            "margem_total": margem_total,
+        }
 
         p4_individual = calcular_metricas_pagina4(
-            diario, minimum_margin=margem, percentil_cauda=args.percentil_cauda,
+            diario_simulado, minimum_margin=margem_total, percentil_cauda=args.percentil_cauda,
             fracao_reserva_operacional=args.fracao_reserva_operacional, increment=args.increment,
         )
         limiares_individuais[nome_robo] = p4_individual["limiar_ativo"]
@@ -852,7 +894,7 @@ def _rodar_modo_portfolio(args):
     beneficio = beneficio_diversificacao(soma_individuais, limiar_agregado_ativo)
 
     secao_portfolio = gerar_secao_portfolio(
-        agregadas, correlacao, limiar_agregado, soma_individuais, beneficio, sorted(diarios),
+        resumo_robos, agregadas, correlacao, limiar_agregado, soma_individuais, beneficio, sorted(diarios),
     )
     html_portfolio = gerar_html_portfolio(secao_portfolio)
 

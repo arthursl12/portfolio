@@ -117,6 +117,7 @@ AJUDA_ROBO = "CSV de exemplo já incluído no repositório (dados_exemplo/)."
 AJUDA_JANELA = "Recorta a série diária para os últimos N a partir da ÚLTIMA data do CSV (não da data de hoje)."
 AJUDA_N_CONTRATOS = "Simula o resultado como se o robô operasse com este número de contratos -- escala linear a partir do valor detectado no CSV (AGENTS.md §9)."
 AJUDA_MINIMUM_MARGIN = "Margem exigida pela corretora para manter a posição configurada (posição total, não por contrato) -- nunca inventada; é preciso informar para calcular o limiar (Página 4)."
+AJUDA_MINIMUM_MARGIN_PORTFOLIO = "Margem exigida pela corretora POR CONTRATO deste robô -- diferente do modo Robô único (que pede a margem da posição TOTAL). Aqui é por contrato porque o número de contratos de cada robô pode ser ajustado dentro do portfólio (para testar dimensionamentos diferentes sem reinformar a margem); margem total desse robô = margem por contrato × contratos simulados."
 AJUDA_PERCENTIL_CAUDA = "Qual percentil do drawdown histórico compõe a reserva de cauda do limiar -- P99 é mais conservador (cauda mais extrema) que P95. Resolução do usuário: os dois ficam disponíveis, não um só fixo."
 AJUDA_RESERVA_OPERACIONAL = "Percentual da margem mínima reservado como colchão operacional -- resolução do usuário: '% de minimum_margin', não um valor fixo em R$."
 AJUDA_INCREMENT = "O limiar bruto é arredondado para cima neste incremento (ex. R$500 arredonda R$13.495 para R$13.500)."
@@ -141,7 +142,19 @@ def rodar_modo_portfolio():
     detecção de contratos_referencia (inclusive o fallback multi-ativo por
     perna) de forma independente -- nenhuma lógica de custo mensal/janela/
     Monte Carlo do modo Robô único entra aqui (fora do escopo desta
-    primeira fatia do Épico 10, ver docstring de tradefolio.portfolio)."""
+    primeira fatia do Épico 10, ver docstring de tradefolio.portfolio).
+
+    Convenção de escala (pedido explícito do usuário, para permitir
+    testar diferentes números de contratos por robô dentro do portfólio
+    sem reinformar a margem toda vez): a margem mínima aqui é POR
+    CONTRATO, diferente do modo Robô único (posição total) -- a margem
+    total de cada robô = margem/contrato × contratos simulados no
+    portfólio. `diario['liquido']` de cada robô também é reescalado de
+    `liquido_por_contrato × n_contratos` (mesma convenção linear de
+    `tradefolio.daily.escalar_por_contratos`) ANTES de sincronizar --
+    tanto o limiar individual (para "soma dos limiares individuais")
+    quanto a sincronização do portfólio usam o robô já no tamanho
+    simulado, para a comparação ser sobre a mesma base."""
     with st.sidebar:
         st.header("Robôs do portfólio")
         fonte = st.radio(
@@ -178,12 +191,16 @@ def rodar_modo_portfolio():
             "Incremento de arredondamento (R$)", min_value=1.0, value=500.0,
             step=100.0, key="portfolio_increment", help=AJUDA_INCREMENT,
         )
-        st.header("Margem mínima por robô")
-        st.caption(AJUDA_MINIMUM_MARGIN)
+        st.header("Contratos e margem por robô")
+        st.caption(
+            "Número de contratos simulado por robô DENTRO do portfólio (independente do "
+            "detectado no CSV -- permite testar outros dimensionamentos) e a margem por "
+            "contrato de cada um."
+        )
 
     st.header("Portfólio")
 
-    diarios, minimum_margins, limiares_individuais = {}, {}, {}
+    diarios, minimum_margins, limiares_individuais, resumo_robos = {}, {}, {}, {}
     houve_erro = False
 
     for arquivo in arquivos:
@@ -215,17 +232,37 @@ def rodar_modo_portfolio():
                 continue
 
         diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
-        diarios[nome_robo] = diario
 
         with st.sidebar:
-            margem = st.number_input(
-                f"{nome_robo}: margem mínima (R$)", min_value=0.0, value=None,
-                step=500.0, key=f"portfolio_margin::{nome_arquivo}", help=AJUDA_MINIMUM_MARGIN,
+            n_contratos_robo = st.number_input(
+                f"{nome_robo}: número de contratos no portfólio", min_value=1, max_value=200,
+                value=int(contratos_referencia), step=1,
+                key=f"portfolio_n_contratos::{nome_arquivo}", help=AJUDA_N_CONTRATOS,
             )
-        if margem is not None:
-            minimum_margins[nome_robo] = margem
+            margem_por_contrato = st.number_input(
+                f"{nome_robo}: margem mínima por contrato (R$)", min_value=0.0, value=None,
+                step=100.0, key=f"portfolio_margin::{nome_arquivo}", help=AJUDA_MINIMUM_MARGIN_PORTFOLIO,
+            )
+
+        # Reescala o robô inteiro (não só a margem) para o número de
+        # contratos simulado no portfólio -- mesma convenção de
+        # tradefolio.daily.escalar_por_contratos usada no modo Robô único,
+        # aplicada aqui ao `liquido` (escala TOTAL) via liquido_por_contrato.
+        diario_simulado = diario.copy()
+        diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos_robo
+        diarios[nome_robo] = diario_simulado
+        resumo_robos[nome_robo] = {
+            "contratos_referencia": int(contratos_referencia),
+            "n_contratos": int(n_contratos_robo),
+        }
+
+        if margem_por_contrato is not None:
+            margem_total = margem_por_contrato * n_contratos_robo
+            minimum_margins[nome_robo] = margem_total
+            resumo_robos[nome_robo]["margem_por_contrato"] = margem_por_contrato
+            resumo_robos[nome_robo]["margem_total"] = margem_total
             p4_individual = calcular_pagina4(
-                diario, minimum_margin=margem, percentil_cauda=percentil_cauda,
+                diario_simulado, minimum_margin=margem_total, percentil_cauda=percentil_cauda,
                 fracao_reserva_operacional=fracao_reserva_operacional_pct / 100, increment=increment,
             )
             limiares_individuais[nome_robo] = p4_individual["limiar_ativo"]
@@ -235,6 +272,18 @@ def rodar_modo_portfolio():
     if len(diarios) < 2:
         st.warning("São necessários ao menos 2 robôs válidos para sincronizar um portfólio.")
         return
+
+    tabela_composicao = pd.DataFrame({
+        nome: {
+            "Contratos de referência (detectado)": info["contratos_referencia"],
+            "Contratos simulados no portfólio": info["n_contratos"],
+            "Margem/contrato (R$)": fmt(info.get("margem_por_contrato"), moeda=True),
+            "Margem total (R$)": fmt(info.get("margem_total"), moeda=True),
+        }
+        for nome, info in resumo_robos.items()
+    }).T
+    st.subheader("Composição do portfólio")
+    st.table(tabela_composicao)
 
     largo = sincronizar_portfolio(diarios)
     agregadas = metricas_agregadas(largo)
