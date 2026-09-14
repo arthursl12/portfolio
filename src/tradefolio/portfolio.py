@@ -49,6 +49,7 @@ Decisões de design (documentadas, não escondidas -- AGENTS.md §8):
   individuais -- aqui não se soma nada, `decompor_limiar` calcula um
   limiar genuinamente novo a partir dos dados agregados.
 """
+import itertools
 import math
 
 import pandas as pd
@@ -307,3 +308,142 @@ def contribuicao_marginal(
             "diferenca_limiar": limiar_completo - limiar_sem,
         }
     return resultado
+
+
+_OBJETIVOS_OTIMIZACAO = (
+    "maximizar_rlt", "minimizar_mdd_sobre_limiar", "maximizar_lucro_com_limite_mdd",
+)
+_LIMITE_COMBINACOES_OTIMIZACAO = 20000
+
+
+def otimizar_portfolio(
+    diarios_referencia: dict,
+    margens_por_contrato: dict,
+    candidatos_contratos: dict,
+    objetivo: str,
+    limite_mdd: float = None,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = None,
+    top_n: int = 10,
+) -> dict:
+    """Tarefa 10.8 -- busca discreta (NÃO otimização contínua, o PDF-fonte
+    pede isso explicitamente) sobre combinações de número de contratos
+    por robô. `0` é um candidato válido em `candidatos_contratos` --
+    exclui aquele robô inteiramente do portfólio para aquela combinação
+    (pedido explícito do usuário: "tirar um robô também é uma
+    possibilidade"; não incluído automaticamente -- o chamador decide se
+    0 entra na lista de candidatos de cada robô).
+
+    `diarios_referencia`: {nome: diario} na escala de referência
+    (`liquido_por_contrato`, invariante ao número de contratos simulado
+    -- mesma convenção linear de `daily.escalar_por_contratos`).
+    `margens_por_contrato`: {nome: margem por contrato} -- margem de cada
+    candidato = margem_por_contrato × n_contratos (mesma convenção do
+    modo Portfólio nas UIs). `candidatos_contratos`: {nome: [n_contratos
+    a testar]}.
+
+    Custo mensal NÃO entra nesta busca (simplificação documentada, não
+    escondida): tornaria cada combinação dependente de uma tabela de
+    faixas por robô, e o objetivo desta primeira fatia é o dimensionamento
+    puro. Quem quiser o efeito do custo mensal aplica a tabela sobre a
+    alocação vencedora depois, fora desta função.
+
+    Objetivos suportados (dos 6 do PDF-fonte, só os que NÃO dependem de
+    uma política de vapo para o portfólio -- decisão ainda não tomada,
+    ver `rlt_e_risco_portfolio`):
+    - "maximizar_rlt": maior RLT acumulado da combinação.
+    - "minimizar_mdd_sobre_limiar": menor |MDD/limiar| (mais seguro,
+      mais perto de zero -- NÃO o valor mais negativo, que seria pior).
+    - "maximizar_lucro_com_limite_mdd": maior lucro total entre as
+      combinações cujo MDD não é pior que `limite_mdd` (obrigatório para
+      este objetivo -- nunca inventado, AGENTS.md §8).
+    Deliberadamente NÃO implementados: "maximizar VLT" e "maximizar vapo
+    com limite de capital" (precisam de uma política de vapo escolhida
+    PARA O PORTFÓLIO, não pedida ainda) e "minimizar pior cenário
+    deteriorado" (precisaria rodar Monte Carlo + deterioração para cada
+    combinação testada -- caro e uma decisão de escopo própria).
+
+    `top_n`: retorna as `top_n` melhores combinações, não só a primeira
+    -- o PDF-fonte pede explicitamente para NUNCA reportar só o melhor
+    resultado da amostra (risco de sobreajuste de busca com muitas
+    tentativas). `n_combinacoes_testadas` no resultado deixa esse risco
+    visível para quem consome (quanto mais combinações, maior a chance
+    do "melhor" ser sorte de amostra, não edge real).
+
+    Levanta `ValueError` se o total de combinações exceder
+    `_LIMITE_COMBINACOES_OTIMIZACAO` (busca discreta não escala para
+    muitas combinações -- reduza os candidatos por robô) ou se nenhuma
+    combinação satisfizer as restrições do objetivo escolhido."""
+    if objetivo not in _OBJETIVOS_OTIMIZACAO:
+        raise ValueError(f"objetivo deve ser um de {_OBJETIVOS_OTIMIZACAO}, recebido {objetivo!r}")
+    if objetivo == "maximizar_lucro_com_limite_mdd" and limite_mdd is None:
+        raise ValueError("limite_mdd é obrigatório para o objetivo 'maximizar_lucro_com_limite_mdd'")
+
+    nomes = list(diarios_referencia.keys())
+    listas_candidatos = [candidatos_contratos[nome] for nome in nomes]
+
+    n_total = math.prod(len(lista) for lista in listas_candidatos)
+    if n_total > _LIMITE_COMBINACOES_OTIMIZACAO:
+        raise ValueError(
+            f"{n_total} combinações excede o limite de {_LIMITE_COMBINACOES_OTIMIZACAO} -- "
+            "reduza o número de candidatos por robô (ou o passo entre eles)"
+        )
+
+    resultados = []
+    for combinacao in itertools.product(*listas_candidatos):
+        alocacao = dict(zip(nomes, combinacao))
+
+        diarios_ativos, margens_ativas = {}, {}
+        for nome, n_contratos in alocacao.items():
+            if n_contratos == 0:
+                continue
+            diario = diarios_referencia[nome]
+            diario_simulado = diario.copy()
+            diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos
+            diarios_ativos[nome] = diario_simulado
+            margens_ativas[nome] = margens_por_contrato[nome] * n_contratos
+
+        if not diarios_ativos:
+            continue
+
+        largo = sincronizar_portfolio(diarios_ativos)
+        agregadas = metricas_agregadas(largo)
+
+        if objetivo == "maximizar_lucro_com_limite_mdd":
+            if agregadas["mdd"] < limite_mdd:
+                continue
+            score = agregadas["lucro_total"]
+        else:
+            score = None
+
+        limiar = limiar_agregado_portfolio(
+            largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
+        )
+        limiar_ativo = limiar.get("limiar_recomendado", limiar["limiar_bruto"])
+
+        if score is None:
+            rlt = rlt_e_risco_portfolio(largo, limiar=limiar_ativo)
+            score = rlt["rlt_acumulado"] if objetivo == "maximizar_rlt" else -abs(rlt["mdd_sobre_limiar"])
+
+        resultados.append({
+            "alocacao": alocacao,
+            "score": score,
+            "lucro_total": agregadas["lucro_total"],
+            "mdd": agregadas["mdd"],
+            "es_95": agregadas["es_95"],
+            "limiar_ativo": limiar_ativo,
+        })
+
+    if not resultados:
+        raise ValueError(
+            "Nenhuma combinação testada satisfaz as restrições do objetivo escolhido "
+            f"({objetivo}, limite_mdd={limite_mdd})"
+        )
+
+    resultados.sort(key=lambda r: r["score"], reverse=True)
+    return {
+        "objetivo": objetivo,
+        "n_combinacoes_testadas": len(resultados),
+        "melhores": resultados[:top_n],
+    }

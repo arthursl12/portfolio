@@ -55,6 +55,7 @@ from tradefolio.portfolio import (
     correlacao_volatilidade_alta,
     limiar_agregado_portfolio,
     metricas_agregadas,
+    otimizar_portfolio,
     rlt_e_risco_portfolio,
     serie_combinada,
     sincronizar_operou,
@@ -293,3 +294,79 @@ def test_contribuicao_marginal_exige_ao_menos_2_robos():
     diarios = {"resgat": _diarios_reais()["resgat"]}
     with pytest.raises(ValueError, match="2"):
         contribuicao_marginal(diarios, {"resgat": 5000.0})
+
+
+# --- Tarefa 10.8: otimização de portfólio (busca discreta) --------------
+#
+# lâmina ideal.pdf §13/tarefas e épicos.pdf tarefa 10.8: busca discreta
+# (não otimização contínua, pedido explícito do PDF-fonte) sobre
+# combinações de número de contratos por robô -- 0 é um candidato válido
+# (excluir o robô inteiramente do portfólio, pedido explícito do
+# usuário: "tirar um robô também é uma possibilidade"). Só os objetivos
+# que NÃO precisam de uma política de vapo para o portfólio (decisão
+# ainda não tomada) são implementados: maximizar RLT, minimizar |MDD/L|,
+# maximizar lucro com limite de MDD. Valores conferidos por script antes
+# destes testes (candidatos pequenos para o script ser verificável à
+# mão: resgat 0/3/6, gridhedge 0/1, romanos2 0/2 -- 12 combinações).
+
+_MARGENS_POR_CONTRATO_10_8 = {"resgat": 1000.0, "gridhedge": 5000.0, "romanos2": 2500.0}
+_CANDIDATOS_10_8 = {"resgat": [0, 3, 6], "gridhedge": [0, 1], "romanos2": [0, 2]}
+_PARAMS_10_8 = dict(percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500)
+
+
+def test_otimizar_portfolio_maximizar_rlt_pode_excluir_robo():
+    diarios = _diarios_reais()
+    resultado = otimizar_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        objetivo="maximizar_rlt", **_PARAMS_10_8,
+    )
+    # 3*2*2=12 combinações totais, menos a combinação "todos em 0" (não é
+    # um portfólio válido, pulada) = 11.
+    assert resultado["n_combinacoes_testadas"] == 11
+    melhor = resultado["melhores"][0]
+    # o melhor RLT exclui gridhedge inteiramente (conferido por script) --
+    # demonstração real de que excluir um robô pode ser ótimo.
+    assert melhor["alocacao"] == {"resgat": 6, "gridhedge": 0, "romanos2": 2}
+    assert melhor["score"] == pytest.approx(3.7841, abs=1e-3)
+    assert melhor["lucro_total"] == pytest.approx(56761.5, abs=1e-2)
+
+
+def test_otimizar_portfolio_minimizar_mdd_sobre_limiar():
+    diarios = _diarios_reais()
+    resultado = otimizar_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        objetivo="minimizar_mdd_sobre_limiar", **_PARAMS_10_8,
+    )
+    melhor = resultado["melhores"][0]
+    assert melhor["alocacao"] == {"resgat": 3, "gridhedge": 1, "romanos2": 2}
+    assert melhor["score"] == pytest.approx(-0.19884848484848486, abs=1e-6)
+
+
+def test_otimizar_portfolio_maximizar_lucro_com_limite_mdd():
+    diarios = _diarios_reais()
+    resultado = otimizar_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        objetivo="maximizar_lucro_com_limite_mdd", limite_mdd=-3000.0, **_PARAMS_10_8,
+    )
+    melhor = resultado["melhores"][0]
+    assert melhor["alocacao"] == {"resgat": 3, "gridhedge": 0, "romanos2": 2}
+    assert melhor["lucro_total"] == pytest.approx(39274.5, abs=1e-2)
+    assert melhor["mdd"] >= -3000.0
+
+
+def test_otimizar_portfolio_maximizar_lucro_exige_limite_mdd():
+    diarios = _diarios_reais()
+    with pytest.raises(ValueError, match="limite_mdd"):
+        otimizar_portfolio(
+            diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+            objetivo="maximizar_lucro_com_limite_mdd",
+        )
+
+
+def test_otimizar_portfolio_sem_combinacao_valida_levanta_erro():
+    diarios = _diarios_reais()
+    with pytest.raises(ValueError, match="[Nn]enhuma"):
+        otimizar_portfolio(
+            diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+            objetivo="maximizar_lucro_com_limite_mdd", limite_mdd=-1000.0, **_PARAMS_10_8,
+        )

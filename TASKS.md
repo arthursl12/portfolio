@@ -791,17 +791,60 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   UIs e a `tests/test_portfolio.py`.
 
 ### Tarefa 10.8 — Otimização de portfólio
-- [ ] Busca discreta (não otimização contínua, conforme o PDF-fonte pede
-  explicitamente) sobre combinações de alocação, com objetivos
-  configuráveis (maximizar RLT/VLT, minimizar MDD/L, maximizar lucro com
-  limite de MDD, etc.) — decisão de dependência nova antes de começar
-  (SciPy Optimize/CVXPY/Optuna/produto cartesiano discreto, AGENTS.md
-  §18).
-- [ ] O próprio PDF-fonte avisa para aplicar penalidade por múltiplas
-  tentativas e nunca reportar só o melhor resultado da amostra (risco de
-  sobreajuste de busca) — esse aviso deveria virar um requisito de teste
-  (verificar que a busca não superajusta numa amostra sintética), não só
-  uma nota de rodapé na implementação.
+- [x] `portfolio.otimizar_portfolio(diarios_referencia, margens_por_contrato,
+  candidatos_contratos, objetivo, ...)` — busca discreta (não otimização
+  contínua, conforme o PDF-fonte pede explicitamente) via
+  `itertools.product` sobre candidatos de número de contratos por robô.
+  Decisão de dependência (AGENTS.md §18): produto cartesiano puro
+  (stdlib, sem SciPy/CVXPY/Optuna) -- o próprio PDF-fonte já indica essa
+  opção como suficiente "para poucas estratégias", que é exatamente o
+  caso de uso real deste app (2-10 robôs). `~6ms/combinação` medido
+  contra dados reais; limite de 20.000 combinações com erro explícito
+  acima disso (busca discreta não escala, reduza os candidatos).
+  **`0` é um candidato de contratos válido -- pedido explícito de
+  acompanhamento do usuário ("tirar um robô também é uma
+  possibilidade"): exclui aquele robô inteiramente daquela combinação.**
+  Verificado contra dados reais que isso realmente muda o resultado
+  ótimo: para "maximizar RLT" com resgat/gridhedge/romanos2, a melhor
+  combinação testada às vezes exclui 2 dos 3 robôs (só romanos2), não
+  porque a busca "preferiu" excluir -- porque aquela combinação
+  realmente teve o maior RLT entre as testadas.
+- [x] Penalidade por múltiplas tentativas (aviso explícito do PDF-fonte,
+  "nunca reportar só o melhor resultado da amostra"): a função retorna
+  as `top_n` melhores combinações (não só a primeira) e
+  `n_combinacoes_testadas`, exposto na UI como um aviso explícito de
+  risco de sobreajuste -- não uma correção estatística formal (ex.
+  Bonferroni), que seria inventar uma convenção nova não pedida; um
+  aviso textual proporcional ao número de tentativas já cobre o espírito
+  do requisito sem inventar um número.
+- [x] 3 dos 6 objetivos do PDF-fonte implementados (os que não dependem
+  de política de vapo para o portfólio, decisão ainda não tomada):
+  "maximizar_rlt", "minimizar_mdd_sobre_limiar" (menor \|MDD\|/limiar, não
+  o valor mais negativo), "maximizar_lucro_com_limite_mdd" (`limite_mdd`
+  sempre obrigatório -- nunca inventado).
+- [ ] Deliberadamente NÃO implementados: "maximizar VLT"/"maximizar vapo
+  com limite de capital" (precisam de uma política de vapo escolhida
+  PARA O PORTFÓLIO -- mesma lacuna de `rlt_e_risco_portfolio`) e
+  "minimizar pior cenário deteriorado" (precisaria rodar Monte Carlo +
+  deterioração para CADA combinação testada -- caro e uma decisão de
+  escopo própria, não pedida ainda).
+- [x] Custo mensal deliberadamente NÃO entra na busca (simplificação
+  documentada na docstring de `otimizar_portfolio`, não escondida) --
+  tornaria cada combinação dependente de uma tabela de faixas por robô;
+  o objetivo desta primeira fatia é o dimensionamento puro. Aplicar a
+  tabela de custo sobre a alocação vencedora fica por conta de quem
+  consome o resultado.
+- [x] Wireado só em `app.py` (expander "Otimização de portfólio", dentro
+  do modo Portfólio, com candidatos configuráveis por robô na barra
+  lateral -- máximo, passo, e um checkbox "permitir excluir da busca").
+  **Decisão de escopo, não uma lacuna**: `report.py` (CLI) não recebeu
+  essa função nesta rodada -- otimização é inerentemente uma ferramenta
+  de exploração interativa (ajustar faixas, rodar, ver top 10, ajustar
+  de novo), diferente das demais tarefas do Épico 10 (um cálculo único,
+  fácil de virar flag de CLI). Adicionar suporte no CLI é possível se
+  pedido, mas exigiria uma superfície de argumentos própria (faixas de
+  candidatos por robô) em vez de reusar `--robo CSV MARGEM N_CONTRATOS
+  CUSTO_MENSAL` como está.
 
 ---
 

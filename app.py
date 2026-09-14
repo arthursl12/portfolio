@@ -44,6 +44,7 @@ from tradefolio.portfolio import (
     correlacao_volatilidade_alta,
     limiar_agregado_portfolio,
     metricas_agregadas,
+    otimizar_portfolio,
     rlt_e_risco_portfolio,
     sincronizar_operou,
     sincronizar_portfolio,
@@ -220,6 +221,7 @@ def rodar_modo_portfolio():
     st.header("Portfólio")
 
     diarios, minimum_margins, limiares_individuais, resumo_robos = {}, {}, {}, {}
+    diarios_referencia, margens_por_contrato, candidatos_contratos = {}, {}, {}
     houve_erro = False
 
     for arquivo in arquivos:
@@ -251,6 +253,7 @@ def rodar_modo_portfolio():
                 continue
 
         diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+        diarios_referencia[nome_robo] = diario
 
         with st.sidebar:
             n_contratos_robo = st.number_input(
@@ -262,6 +265,26 @@ def rodar_modo_portfolio():
                 f"{nome_robo}: margem mínima por contrato (R$)", min_value=0.0, value=None,
                 step=100.0, key=f"portfolio_margin::{nome_arquivo}", help=AJUDA_MINIMUM_MARGIN_PORTFOLIO,
             )
+            with st.expander(f"{nome_robo}: candidatos para otimização"):
+                permitir_excluir_robo = st.checkbox(
+                    "Permitir excluir este robô da busca (candidato 0)", value=True,
+                    key=f"portfolio_permitir_excluir::{nome_arquivo}",
+                    help="Tarefa 10.8 -- 0 contratos = robô fora do portfólio nesta combinação. "
+                         "Desmarque para forçar que este robô sempre esteja incluído na busca.",
+                )
+                max_candidato_robo = st.number_input(
+                    "Máximo de contratos candidato", min_value=1, max_value=200,
+                    value=int(contratos_referencia) * 2, step=1,
+                    key=f"portfolio_max_candidato::{nome_arquivo}",
+                )
+                passo_candidato_robo = st.number_input(
+                    "Passo entre candidatos", min_value=1, max_value=int(max_candidato_robo),
+                    value=1, step=1, key=f"portfolio_passo_candidato::{nome_arquivo}",
+                )
+            candidatos_robo = list(range(int(passo_candidato_robo), int(max_candidato_robo) + 1, int(passo_candidato_robo)))
+            if permitir_excluir_robo:
+                candidatos_robo = [0] + candidatos_robo
+            candidatos_contratos[nome_robo] = candidatos_robo
             st.caption(f"{nome_robo}: custo mensal por faixa de contratos (R$)")
             faixas_editadas_robo = st.data_editor(
                 pd.DataFrame({"min_contratos": [1], "max_contratos": [None], "custo_mensal": [0.0]}),
@@ -305,6 +328,7 @@ def rodar_modo_portfolio():
         if margem_por_contrato is not None:
             margem_total = margem_por_contrato * n_contratos_robo
             minimum_margins[nome_robo] = margem_total
+            margens_por_contrato[nome_robo] = margem_por_contrato
             resumo_robos[nome_robo]["margem_por_contrato"] = margem_por_contrato
             resumo_robos[nome_robo]["margem_total"] = margem_total
             p4_individual = calcular_pagina4(
@@ -471,16 +495,85 @@ def rodar_modo_portfolio():
                 for nome, c in contribuicoes.items()
             }).T
             st.table(tabela_contribuicao)
+
+        with st.expander("Otimização de portfólio (busca discreta)"):
+            st.caption(
+                "Tarefa 10.8 -- busca discreta (não otimização contínua, pedido explícito do "
+                "PDF-fonte) sobre combinações de número de contratos por robô. 0 contratos é um "
+                "candidato válido -- excluir um robô inteiramente do portfólio também é testado "
+                "quando \"permitir excluir\" está marcado (barra lateral, por robô). Custo mensal "
+                "não entra nesta busca (simplificação documentada -- ver docstring de "
+                "tradefolio.portfolio.otimizar_portfolio)."
+            )
+            objetivo_rotulo = st.radio(
+                "Objetivo", ["Maximizar RLT", "Minimizar risco (|MDD| / limiar)", "Maximizar lucro (com limite de MDD)"],
+                key="portfolio_objetivo_otimizacao",
+            )
+            objetivo_map = {
+                "Maximizar RLT": "maximizar_rlt",
+                "Minimizar risco (|MDD| / limiar)": "minimizar_mdd_sobre_limiar",
+                "Maximizar lucro (com limite de MDD)": "maximizar_lucro_com_limite_mdd",
+            }
+            objetivo_otimizacao = objetivo_map[objetivo_rotulo]
+
+            limite_mdd = None
+            if objetivo_otimizacao == "maximizar_lucro_com_limite_mdd":
+                limite_mdd = st.number_input(
+                    "Limite de MDD (R$, negativo -- ex. -5000)", max_value=0.0, value=None,
+                    step=500.0, key="portfolio_limite_mdd",
+                    help="Só combinações cujo MDD não seja pior que este valor entram na busca -- "
+                         "obrigatório para este objetivo, nunca inventado.",
+                )
+
+            n_total_candidatos = 1
+            for lista in candidatos_contratos.values():
+                n_total_candidatos *= len(lista)
+            st.caption(f"{n_total_candidatos} combinações a testar (ajuste os candidatos por robô na barra lateral).")
+
+            pode_rodar = objetivo_otimizacao != "maximizar_lucro_com_limite_mdd" or limite_mdd is not None
+            if st.button("Rodar otimização", disabled=not pode_rodar):
+                try:
+                    resultado_otimizacao = otimizar_portfolio(
+                        diarios_referencia, margens_por_contrato, candidatos_contratos,
+                        objetivo=objetivo_otimizacao, limite_mdd=limite_mdd,
+                        percentil_cauda=percentil_cauda,
+                        fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
+                        increment=increment,
+                    )
+                except ValueError as erro:
+                    st.error(str(erro))
+                else:
+                    st.caption(
+                        f"{resultado_otimizacao['n_combinacoes_testadas']} combinações testadas -- "
+                        "quanto mais tentativas, maior o risco de a melhor combinação ser sorte de "
+                        "amostra, não edge real (o PDF-fonte pede para nunca reportar só o melhor "
+                        "resultado; por isso as top 10 aparecem, não só a primeira)."
+                    )
+                    tabela_otimizacao = pd.DataFrame([
+                        {
+                            **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                            "Lucro": fmt(r["lucro_total"], moeda=True),
+                            "MDD": fmt(r["mdd"], moeda=True),
+                            "ES95": fmt(r["es_95"], moeda=True),
+                            "Limiar": fmt(r["limiar_ativo"], moeda=True),
+                            "Score": fmt(r["score"], 4),
+                        }
+                        for r in resultado_otimizacao["melhores"]
+                    ])
+                    st.table(tabela_otimizacao)
+            elif not pode_rodar:
+                st.info("Informe o limite de MDD acima para habilitar a busca.")
     else:
         st.info(
             "Informe a margem mínima de cada robô na barra lateral para calcular o limiar agregado, "
-            "o benefício da diversificação e a contribuição marginal de cada robô."
+            "o benefício da diversificação, a contribuição marginal de cada robô e rodar a otimização."
         )
 
     st.caption(
         "Fora de escopo nesta versão do modo Portfólio: VLT agregado (precisa de uma política de "
         "vapo escolhida para o portfólio), janela de filtro e Monte Carlo agregados, otimização de "
-        "pesos. Ver TASKS.md (Épico 10) para o que cada um exigiria."
+        "portfólio considerando VLT/pior cenário deteriorado. Ver TASKS.md (Épico 10) para o que "
+        "cada um exigiria."
     )
 
 
