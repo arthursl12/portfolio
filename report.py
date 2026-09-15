@@ -38,6 +38,7 @@ from tradefolio.portfolio import (
     metricas_agregadas,
     restringir_janela_comum,
     rlt_e_risco_portfolio,
+    robustez_portfolio,
     sincronizar_operou,
     sincronizar_portfolio,
 )
@@ -589,7 +590,7 @@ def gerar_secao_portfolio(
     resumo_robos: dict, agregadas: dict, correlacoes: dict, correlacao_movel_df,
     janela_movel: int, limiar_agregado: dict | None, soma_individuais: float | None,
     beneficio: dict | None, rlt: dict | None, contribuicoes: dict | None, nomes_robos: list,
-    periodo_label: str = "",
+    periodo_label: str = "", resumo_robustez: dict | None = None,
 ) -> str:
     """Portfólio agregado (AGENTS.md épico 10) -- composição (contratos e
     margem por robô), métricas combinadas, 5 variantes de correlação +
@@ -718,7 +719,8 @@ def gerar_secao_portfolio(
     {secao_correlacoes}
     {secao_movel}
     {secao_limiar}
-    <p class="nota">Fora de escopo nesta versão do modo Portfólio: VLT agregado (precisa de uma política de vapo escolhida para o portfólio), janela de filtro e Monte Carlo agregados, otimização de pesos. Ver TASKS.md (Épico 10).</p>
+    {gerar_secao_robustez(resumo_robustez, cenario_ativo=False) if resumo_robustez is not None else ''}
+    <p class="nota">Fora de escopo nesta versão do modo Portfólio: VLT agregado (precisa de uma política de vapo escolhida para o portfólio), janela de filtro, cenários de deterioração agregados, otimização de pesos. Ver TASKS.md (Épico 10).</p>
     """
 
 
@@ -841,6 +843,11 @@ def _parse_argumentos():
         help="Mesma janela de fallback do modo robo, aplicada individualmente a cada robô "
              "cuja detecção sobre o histórico inteiro falhar.",
     )
+    p_port.add_argument("--bloco", type=int, choices=(5, 10, 20, 40), default=20, help="Tamanho do bloco (pregões) do circular block bootstrap do portfólio")
+    p_port.add_argument("--trajetorias", type=int, default=2000, help="Número de trajetórias simuladas do portfólio")
+    p_port.add_argument("--horizonte", type=int, default=252, help="Pregões por trajetória simulada do portfólio (252 ≈ 1 ano)")
+    p_port.add_argument("--seed-mc", type=int, default=None, help="Semente do Monte Carlo do portfólio -- omitido gera uma aleatória (sempre reportada no resultado)")
+    p_port.add_argument("--excluir-dias-sem-operacao", action="store_true", help="Exclui dias NO_TRADE do sorteio (padrão: inclui, são histórico legítimo)")
     return parser.parse_args()
 
 
@@ -1018,6 +1025,11 @@ def _rodar_modo_portfolio(args):
         fracao_reserva_operacional=args.fracao_reserva_operacional, increment=args.increment,
         usar_janela_comum=usar_janela_comum,
     )
+    resumo_robustez = robustez_portfolio(
+        largo, tamanho_bloco=args.bloco, n_trajetorias=args.trajetorias, horizonte=args.horizonte,
+        seed=args.seed_mc, incluir_dias_sem_operacao=not args.excluir_dias_sem_operacao,
+        minimum_margin=sum(minimum_margins.values()), limiar=limiar_agregado_ativo,
+    )
 
     periodo_label = (
         f" -- {largo.index.min().strftime('%d/%m/%Y')} a {largo.index.max().strftime('%d/%m/%Y')} "
@@ -1026,7 +1038,7 @@ def _rodar_modo_portfolio(args):
     secao_portfolio = gerar_secao_portfolio(
         resumo_robos, agregadas, correlacoes, correlacao_movel_df, args.janela_movel_correlacao,
         limiar_agregado, soma_individuais, beneficio, rlt, contribuicoes, sorted(diarios),
-        periodo_label,
+        periodo_label, resumo_robustez,
     )
     html_portfolio = gerar_html_portfolio(secao_portfolio)
 

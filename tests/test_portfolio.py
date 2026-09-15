@@ -58,6 +58,7 @@ from tradefolio.portfolio import (
     metricas_agregadas,
     otimizar_portfolio,
     restringir_janela_comum,
+    robustez_portfolio,
     selecionar_melhores_combinacoes,
     rlt_e_risco_portfolio,
     serie_combinada,
@@ -503,3 +504,55 @@ def test_otimizar_portfolio_equivale_a_busca_mais_selecao():
     composto = selecionar_melhores_combinacoes(resultados, objetivo="maximizar_rlt")
     assert direto["melhores"][0]["alocacao"] == composto["melhores"][0]["alocacao"]
     assert direto["n_combinacoes_testadas"] == composto["n_combinacoes_testadas"]
+
+
+# --- Robustez (Monte Carlo) do portfólio ---------------------------------
+#
+# tarefas e épicos.pdf tarefa 8.1: "Para portfólio: Todos os robôs
+# permanecem sincronizados pela data." A máquina de bootstrap
+# (tradefolio.monte_carlo.circular_block_bootstrap/resumo_trajetorias) já
+# foi construída para isso desde o Épico 8 -- aceita um pd.DataFrame
+# multi-coluna e soma entre colunas por trajetória (mesma linha/data
+# sorteada para todos os robôs juntos, preservando a correlação real
+# entre eles em cada bloco sorteado). Nenhuma fórmula nova aqui, só
+# reuso. Valores conferidos por script (seed fixa) antes destes testes.
+
+
+def test_robustez_portfolio_reusa_bootstrap_multi_coluna():
+    diarios = _diarios_reais()
+    largo = restringir_janela_comum(sincronizar_portfolio(diarios))
+
+    resumo = robustez_portfolio(
+        largo, tamanho_bloco=20, n_trajetorias=2000, horizonte=252, seed=42,
+        minimum_margin=45000.0, limiar=53000.0,
+    )
+
+    assert resumo["seed"] == 42
+    assert resumo["tamanho_bloco"] == 20
+    assert resumo["n_trajetorias"] == 2000
+    assert resumo["horizonte"] == 252
+    assert resumo["lucro_p50"] == pytest.approx(33425.94000000001, abs=1e-2)
+    assert resumo["mdd_p95"] == pytest.approx(-5517.5594999999985, abs=1e-2)
+    assert resumo["probabilidade_prejuizo"] == pytest.approx(0.0, abs=1e-9)
+    assert resumo["probabilidade_toca_margem"] == pytest.approx(0.0, abs=1e-9)
+    assert resumo["probabilidade_termina_abaixo_do_limiar"] == pytest.approx(0.9995, abs=1e-4)
+
+
+def test_robustez_portfolio_preenche_nan_com_zero_antes_de_reamostrar():
+    # Escopo "união" (usar_janela_comum=False) tem NaN antes de cada robô
+    # existir -- robustez_portfolio deve tratar isso como 0 (mesma
+    # convenção de serie_combinada), não deixar NaN vazar pro bootstrap.
+    diarios = _diarios_reais()
+    largo_uniao = sincronizar_portfolio(diarios)
+    assert largo_uniao.isna().any().any()  # confirma que há NaN de fato
+
+    resumo = robustez_portfolio(largo_uniao, tamanho_bloco=20, n_trajetorias=100, horizonte=50, seed=1)
+    assert not any(v != v for v in (resumo["lucro_p50"], resumo["mdd_p50"]))  # sem NaN no resultado
+
+
+def test_robustez_portfolio_sem_minimum_margin_ou_limiar_omite_chaves():
+    diarios = _diarios_reais()
+    largo = restringir_janela_comum(sincronizar_portfolio(diarios))
+    resumo = robustez_portfolio(largo, tamanho_bloco=20, n_trajetorias=100, horizonte=50, seed=1)
+    assert "probabilidade_toca_margem" not in resumo
+    assert "probabilidade_termina_abaixo_do_limiar" not in resumo

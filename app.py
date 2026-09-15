@@ -47,6 +47,7 @@ from tradefolio.portfolio import (
     metricas_agregadas,
     restringir_janela_comum,
     rlt_e_risco_portfolio,
+    robustez_portfolio,
     selecionar_melhores_combinacoes,
     sincronizar_operou,
     sincronizar_portfolio,
@@ -152,9 +153,11 @@ def rodar_modo_portfolio():
     diversificação (tradefolio.portfolio). Cada robô roda sua própria
     detecção de contratos_referencia (inclusive o fallback multi-ativo por
     perna) de forma independente. Custo mensal por robô é suportado (ver
-    convenção abaixo); janela de filtro e Monte Carlo do modo Robô único
-    continuam fora daqui (fora do escopo desta primeira fatia do Épico
-    10, ver docstring de tradefolio.portfolio).
+    convenção abaixo), assim como robustez (Monte Carlo) do portfólio
+    combinado (tradefolio.portfolio.robustez_portfolio); janela de filtro
+    do modo Robô único e cenários de deterioração continuam fora daqui
+    (fora do escopo desta primeira fatia do Épico 10, ver docstring de
+    tradefolio.portfolio).
 
     Custo mensal (pedido de acompanhamento do usuário): cada robô tem sua
     própria tabela de faixas (mesmo editor do modo Robô único), debitada
@@ -212,6 +215,27 @@ def rodar_modo_portfolio():
         increment = st.number_input(
             "Incremento de arredondamento (R$)", min_value=1.0, value=500.0,
             step=100.0, key="portfolio_increment", help=AJUDA_INCREMENT,
+        )
+        st.header("Robustez (Monte Carlo) do portfólio")
+        tamanho_bloco_pf = st.selectbox(
+            "Tamanho do bloco (pregões)", [5, 10, 20, 40], index=2,
+            key="portfolio_tamanho_bloco", help=AJUDA_TAMANHO_BLOCO,
+        )
+        n_trajetorias_pf = st.number_input(
+            "Número de trajetórias", min_value=100, max_value=50000, value=2000, step=100,
+            key="portfolio_n_trajetorias", help=AJUDA_N_TRAJETORIAS,
+        )
+        horizonte_pf = st.number_input(
+            "Horizonte (pregões)", min_value=10, max_value=1000, value=252, step=1,
+            key="portfolio_horizonte", help=AJUDA_HORIZONTE,
+        )
+        seed_pf = st.number_input(
+            "Seed (vazio = aleatória)", min_value=0, value=None, step=1,
+            key="portfolio_seed_mc", help=AJUDA_SEED,
+        )
+        incluir_sem_operacao_pf = st.checkbox(
+            "Incluir dias sem operação na reamostragem", value=True,
+            key="portfolio_incluir_sem_op", help=AJUDA_INCLUIR_SEM_OPERACAO,
         )
         st.header("Contratos, margem e custo mensal por robô")
         st.caption(
@@ -643,17 +667,58 @@ def rodar_modo_portfolio():
                             for r in resultado_otimizacao["melhores"]
                         ])
                         st.table(tabela_otimizacao)
+
+        with st.expander("Robustez (Monte Carlo) do portfólio"):
+            st.caption(
+                "Reamostragem sincronizada pela data (tarefas e épicos.pdf tarefa 8.1: \"todos "
+                "os robôs permanecem sincronizados\") -- cada bloco sorteado usa as MESMAS datas "
+                "para todos os robôs, preservando a correlação real entre eles, em vez de "
+                "reamostrar cada um independentemente. Nenhuma fórmula nova -- mesma máquina do "
+                "modo Robô único (tradefolio.monte_carlo), só alimentada com o portfólio inteiro. "
+                "Cenários de deterioração não incluídos aqui (precisariam de colunas por robô sem "
+                "significado agregado coerente, ver docstring de tradefolio.portfolio.robustez_portfolio)."
+            )
+            resumo_robustez_pf = robustez_portfolio(
+                largo, tamanho_bloco=tamanho_bloco_pf, n_trajetorias=int(n_trajetorias_pf),
+                horizonte=int(horizonte_pf), seed=int(seed_pf) if seed_pf is not None else None,
+                incluir_dias_sem_operacao=incluir_sem_operacao_pf,
+                minimum_margin=sum(minimum_margins.values()), limiar=limiar_agregado_ativo,
+            )
+            st.caption(
+                f"{resumo_robustez_pf['n_trajetorias']} trajetórias × {resumo_robustez_pf['horizonte']} "
+                f"pregões, bloco={resumo_robustez_pf['tamanho_bloco']}, seed={resumo_robustez_pf['seed']} "
+                "(reuse essa seed para reproduzir exatamente este resultado)."
+            )
+
+            colmc1, colmc2, colmc3, colmc4, colmc5 = st.columns(5)
+            colmc1.metric("Lucro P5", fmt(resumo_robustez_pf["lucro_p5"], moeda=True))
+            colmc2.metric("Lucro P25", fmt(resumo_robustez_pf["lucro_p25"], moeda=True))
+            colmc3.metric("Lucro P50 (mediano)", fmt(resumo_robustez_pf["lucro_p50"], moeda=True))
+            colmc4.metric("Lucro P75", fmt(resumo_robustez_pf["lucro_p75"], moeda=True))
+            colmc5.metric("Lucro P95", fmt(resumo_robustez_pf["lucro_p95"], moeda=True))
+
+            colmd1, colmd2, colmd3, colmd4 = st.columns(4)
+            colmd1.metric("MDD P50", fmt(resumo_robustez_pf["mdd_p50"], moeda=True))
+            colmd2.metric("MDD P90", fmt(resumo_robustez_pf["mdd_p90"], moeda=True))
+            colmd3.metric("MDD P95", fmt(resumo_robustez_pf["mdd_p95"], moeda=True))
+            colmd4.metric("MDD P99", fmt(resumo_robustez_pf["mdd_p99"], moeda=True))
+
+            colp1, colp2, colp3 = st.columns(3)
+            colp1.metric("Probabilidade de prejuízo", fmt(resumo_robustez_pf["probabilidade_prejuizo"] * 100) + "%")
+            colp2.metric("Probabilidade de tocar a margem", fmt(resumo_robustez_pf["probabilidade_toca_margem"] * 100) + "%")
+            colp3.metric("Prob. terminar abaixo do limiar", fmt(resumo_robustez_pf["probabilidade_termina_abaixo_do_limiar"] * 100) + "%")
     else:
         st.info(
             "Informe a margem mínima de cada robô na barra lateral para calcular o limiar agregado, "
-            "o benefício da diversificação, a contribuição marginal de cada robô e rodar a otimização."
+            "o benefício da diversificação, a contribuição marginal de cada robô, rodar a otimização "
+            "e a robustez (Monte Carlo) do portfólio."
         )
 
     st.caption(
         "Fora de escopo nesta versão do modo Portfólio: VLT agregado (precisa de uma política de "
-        "vapo escolhida para o portfólio), janela de filtro e Monte Carlo agregados, otimização de "
-        "portfólio considerando VLT/pior cenário deteriorado. Ver TASKS.md (Épico 10) para o que "
-        "cada um exigiria."
+        "vapo escolhida para o portfólio), janela de filtro, cenários de deterioração agregados, "
+        "otimização de portfólio considerando VLT/pior cenário deteriorado. Ver TASKS.md (Épico 10) "
+        "para o que cada um exigiria."
     )
 
 

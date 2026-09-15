@@ -57,6 +57,7 @@ import pandas as pd
 from tradefolio import limiar as limiar_mod
 from tradefolio import metrics
 from tradefolio.drawdowns import curva_equity, drawdown, maximo_drawdown, time_under_water_max
+from tradefolio.monte_carlo import circular_block_bootstrap, resumo_trajetorias
 
 
 def sincronizar_portfolio(diarios: dict, multiplicadores: dict = None) -> pd.DataFrame:
@@ -128,6 +129,58 @@ def restringir_janela_comum(largo: pd.DataFrame) -> pd.DataFrame:
     if comum.empty:
         raise ValueError("Os robôs não têm nenhum período em que todos coexistiram (janela comum vazia)")
     return comum
+
+
+def robustez_portfolio(
+    largo: pd.DataFrame,
+    tamanho_bloco: int = 20,
+    n_trajetorias: int = 2000,
+    horizonte: int = 252,
+    seed: int = None,
+    incluir_dias_sem_operacao: bool = True,
+    minimum_margin: float = None,
+    limiar: float = None,
+) -> dict:
+    """Robustez (Monte Carlo) do PORTFÓLIO (tarefas e épicos.pdf tarefa
+    8.1: "Para portfólio: Todos os robôs permanecem sincronizados pela
+    data"). Nenhuma fórmula nova -- reusa `monte_carlo.
+    circular_block_bootstrap`/`resumo_trajetorias` diretamente, que já
+    foram construídas desde o Épico 8 para aceitar um `pd.DataFrame`
+    multi-coluna e manter todas as colunas na MESMA linha/data sorteada
+    (ver docstring de `tradefolio.monte_carlo`) -- isso preserva a
+    correlação real entre os robôs em cada bloco sorteado, em vez de
+    reamostrar cada um independentemente. `resumo_trajetorias` já soma
+    entre colunas por trajetória antes de calcular os percentis, então
+    o resultado é diretamente o lucro/MDD/probabilidades do PORTFÓLIO
+    combinado, mesma forma de `report_data.calcular_robustez` para um
+    robô único.
+
+    `largo` é preenchido com 0 antes de reamostrar (`largo.fillna(0.0)`)
+    -- um robô que ainda não existia (NaN, só ocorre se `largo` vier do
+    escopo "união"; o escopo "janela comum", padrão do módulo, já não
+    tem NaN) não pode contribuir nada para aquele dia sorteado, mesma
+    convenção de `serie_combinada`'s `skipna=True`.
+
+    Deliberadamente NÃO incluído: cenários de deterioração (Épico 8.3 --
+    `aumentar_custos`/`aplicar_slippage`/etc. precisam de `diario['bruto'
+    ]`/`['custo']`/`['n_trades']`, colunas sem significado agregado
+    coerente entre robôs heterogêneos, mesma razão já documentada para
+    `metricas_agregadas`'s `lucro_mensal` não reusar `monthly.
+    agregar_mensal`). `minimum_margin`/`limiar` são os valores do
+    PORTFÓLIO (margem somada, limiar agregado de
+    `limiar_agregado_portfolio`), não de um robô -- opcionais, mesmo
+    padrão de `calcular_robustez`."""
+    dados = largo.fillna(0.0)
+    resultado_bootstrap = circular_block_bootstrap(
+        dados, tamanho_bloco=tamanho_bloco, n_trajetorias=n_trajetorias,
+        horizonte=horizonte, seed=seed, incluir_dias_sem_operacao=incluir_dias_sem_operacao,
+    )
+    resumo = resumo_trajetorias(resultado_bootstrap, minimum_margin=minimum_margin, limiar=limiar)
+    resumo["seed"] = resultado_bootstrap.seed
+    resumo["tamanho_bloco"] = tamanho_bloco
+    resumo["n_trajetorias"] = n_trajetorias
+    resumo["horizonte"] = horizonte
+    return resumo
 
 
 def correlacao_portfolio(largo: pd.DataFrame) -> pd.DataFrame:

@@ -827,6 +827,37 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   `AppTest` e execução real do CLI -- números idênticos entre as duas
   UIs e a `tests/test_portfolio.py`.
 
+### Robustez (Monte Carlo) do portfólio (tarefas e épicos.pdf tarefa 8.1, "Para portfólio: Todos os robôs permanecem sincronizados pela data")
+- [x] `portfolio.robustez_portfolio(largo, ...)` — pedido de acompanhamento
+  do usuário ("do we have monte carlo for the portfolio?" → "yes, build
+  it"). Nenhuma fórmula nova: `monte_carlo.circular_block_bootstrap`/
+  `resumo_trajetorias` já foram construídas desde o Épico 8 para aceitar
+  um `pd.DataFrame` multi-coluna e manter todas as colunas na MESMA
+  linha/data sorteada (docstring do módulo já citava "Épico 10" como o
+  caso de uso futuro) -- `resumo_trajetorias` já soma entre colunas por
+  trajetória antes dos percentis, então o resultado já é diretamente o
+  lucro/MDD/probabilidades do PORTFÓLIO combinado, preservando a
+  correlação real entre robôs em cada bloco sorteado (não uma
+  reamostragem independente por robô).
+- [x] `largo.fillna(0.0)` antes de reamostrar -- mesma convenção de
+  `serie_combinada`'s `skipna=True` (robô que ainda não existia não
+  contribui, não quebra o bootstrap com NaN).
+- [ ] Cenários de deterioração (Épico 8.3) deliberadamente NÃO incluídos
+  -- precisariam de `diario['bruto']`/`['custo']`/`['n_trades']` por
+  robô, sem significado agregado coerente entre robôs heterogêneos
+  (mesma razão já documentada para `metricas_agregadas`'s `lucro_mensal`
+  não reusar `monthly.agregar_mensal`).
+- [x] Wireado em ambas as UIs: `app.py` ganhou sidebar "Robustez (Monte
+  Carlo) do portfólio" (mesmos parâmetros do modo Robô único: bloco,
+  trajetórias, horizonte, seed, incluir dias sem operação) + expander
+  com o mesmo layout de métricas; `report.py` ganhou `--bloco
+  --trajetorias --horizonte --seed-mc --excluir-dias-sem-operacao`
+  (mesmos flags do modo robo) e reusa `gerar_secao_robustez` (já
+  genérica o bastante, sem alteração). Verificado com dados reais
+  (resgat+gridhedge+romanos2, seed=42): lucro P50 R$33.425,94, MDD P95
+  R$-5.517,56 -- números idênticos entre `app.py` (via `AppTest`) e
+  `report.py` (execução real do CLI).
+
 ### Tarefa 10.8 — Otimização de portfólio
 - [x] `portfolio.otimizar_portfolio(diarios_referencia, margens_por_contrato,
   candidatos_contratos, objetivo, ...)` — busca discreta (não otimização
