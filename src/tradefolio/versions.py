@@ -12,6 +12,7 @@ documented," which isn't true for code that hasn't been written.
 VERSOES = {
     # implementadas
     "parser_ordens": "smarttbot_orders_v2",  # v2: BOM UTF-8 + deteccao de delimitador
+    "ingestao_resultados_diarios": "daily_results_v1",  # formato alternativo p/ robos sem export order-level (ex. TradingX) -- carregar_resultados_diarios/montar_diario_resultados/eh_formato_resultados_diarios; bruto/custo/n_trades ficam NaN (desconhecidos, nao inventados), contratos_referencia=1 fixo (decisao do usuario, nao detectada), pagina 2 (trade-level) nao suportada neste formato
     "validacao": "validacao_v2",  # v2: Status/canceladas, UNKNOWN_ASSET, QUANTITY_MISMATCH, INVALID_MONETARY_VALUE
     "agregacao_diaria": "daily_v2",  # v2: exclui ordens nao executadas (Status != "executada")
     "calendario_b3": "alignment_v1",

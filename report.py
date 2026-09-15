@@ -23,6 +23,12 @@ from tradefolio.daily import (
     detectar_contratos_referencia,
     detectar_contratos_referencia_multi_ativo,
 )
+from tradefolio.daily_results import (
+    CONTRATOS_REFERENCIA_RESULTADOS_DIARIOS,
+    carregar_resultados_diarios,
+    eh_formato_resultados_diarios,
+    montar_diario_resultados,
+)
 from tradefolio.drawdowns import episodios_drawdown
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
@@ -478,7 +484,7 @@ def gerar_html(
     linhas = [
         ("Período", f"{p_ini.strftime('%d/%m/%Y')} a {p_fim.strftime('%d/%m/%Y')}", "periodo"),
         ("Pregões", f"{metricas['pregoes']}", "pregoes"),
-        ("Operações (trades reconstruídos)", f"{metricas['n_trades_reconstruidos']}", "n_trades"),
+        ("Operações (trades reconstruídos)", fmt(metricas["n_trades_reconstruidos"], 0), "n_trades"),
         ("Win rate (por trade)", fmt(metricas["win_rate_trades"], pct=True), "win_rate_trades"),
         ("Lucro líquido (2 contratos)", fmt(metricas["lucro_liquido_2c"], moeda=True), "lucro_liquido_2c"),
         ("Lucro líquido por contrato", fmt(metricas["lucro_liquido_por_contrato"], moeda=True), "lucro_liquido_por_contrato"),
@@ -854,22 +860,40 @@ def _parse_argumentos():
 def _rodar_modo_robo(args):
     robo = args.robo or args.csv_path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
 
-    ordens = carregar_ordens(args.csv_path)
-    try:
-        contratos_referencia = detectar_contratos_referencia(ordens)
-    except ValueError:
-        # Robô multi-ativo com proporção fixa entre pernas (ex. Robô Raiz:
-        # 3 WIN + 2 WDO por unidade) -- misturar as pernas numa única
-        # distribuição não detecta nada. Tenta por ativo sobre uma janela
-        # recente antes de desistir.
-        por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=args.dias_recentes_deteccao)
-        contratos_referencia = sum(por_ativo.values())
-        composicao = " + ".join(f"{qtd} {ativo}" for ativo, qtd in sorted(por_ativo.items()))
-        print(
-            f"Detecção sobre o histórico inteiro falhou -- detectado por ativo sobre os "
-            f"últimos {args.dias_recentes_deteccao} dias: {composicao} (total {contratos_referencia})."
-        )
-    diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+    eh_resultados_diarios = eh_formato_resultados_diarios(args.csv_path)
+    ordens = None
+
+    if eh_resultados_diarios:
+        # Robô sem exportação order-level (ex. TradingX) -- só resultado
+        # diário já agregado. contratos_referencia=1 fixo (decisão do
+        # usuário, não detectada -- ver tradefolio.daily_results).
+        if args.aumento_custos or args.slippage:
+            raise SystemExit(
+                "--aumento-custos/--slippage exigem custo B3/contagem de trades por dia, "
+                "que este formato (resultado diário já agregado, sem detalhe de ordem) não "
+                f"tem ({args.csv_path})."
+            )
+        resultados_diarios = carregar_resultados_diarios(args.csv_path)
+        diario = montar_diario_resultados(resultados_diarios)
+        contratos_referencia = CONTRATOS_REFERENCIA_RESULTADOS_DIARIOS
+    else:
+        ordens = carregar_ordens(args.csv_path)
+        try:
+            contratos_referencia = detectar_contratos_referencia(ordens)
+        except ValueError:
+            # Robô multi-ativo com proporção fixa entre pernas (ex. Robô Raiz:
+            # 3 WIN + 2 WDO por unidade) -- misturar as pernas numa única
+            # distribuição não detecta nada. Tenta por ativo sobre uma janela
+            # recente antes de desistir.
+            por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=args.dias_recentes_deteccao)
+            contratos_referencia = sum(por_ativo.values())
+            composicao = " + ".join(f"{qtd} {ativo}" for ativo, qtd in sorted(por_ativo.items()))
+            print(
+                f"Detecção sobre o histórico inteiro falhou -- detectado por ativo sobre os "
+                f"últimos {args.dias_recentes_deteccao} dias: {composicao} (total {contratos_referencia})."
+            )
+        diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+
     tabela_custo_mensal = TabelaCustoMensal(faixas=(FaixaCustoMensal(1, None, args.custo_mensal),))
     diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)
     secao_custo_mensal = gerar_secao_custo_mensal(resumo_custo_mensal(diario))
@@ -878,13 +902,28 @@ def _rodar_modo_robo(args):
     episodios = episodios_drawdown(equity, top_n=len(equity))
     grafico_b64 = fig_para_base64(montar_figura_curva_drawdown(equity, drawdown, episodios=episodios))
 
-    p2 = calcular_metricas_pagina2(diario, ordens)
-    metricas["n_trades_reconstruidos"] = p2["n_trades"]
-    metricas["win_rate_trades"] = p2["win_rate_trades"]
-    metricas["profit_factor_trades"] = p2["profit_factor_trades"]
-    metricas["lucro_medio_trade"] = p2["lucro_medio_trade"]
-    metricas["prejuizo_medio_trade"] = p2["prejuizo_medio_trade"]
-    secao_pagina2 = gerar_secao_pagina2(p2)
+    if eh_resultados_diarios:
+        # Sem dado de ordem -- essas chaves ficam None (fmt() já renderiza
+        # None como "—"), não inventadas, e gerar_html as referencia
+        # incondicionalmente na tabela da página 1.
+        metricas["n_trades_reconstruidos"] = None
+        metricas["win_rate_trades"] = None
+        metricas["profit_factor_trades"] = None
+        metricas["lucro_medio_trade"] = None
+        metricas["prejuizo_medio_trade"] = None
+        secao_pagina2 = (
+            '<p class="nota">Página 2 (métricas de trade -- Profit Factor, sequências, win '
+            'rate) não disponível: este robô não tem dados de ordem, apenas resultado diário '
+            'já agregado.</p>'
+        )
+    else:
+        p2 = calcular_metricas_pagina2(diario, ordens)
+        metricas["n_trades_reconstruidos"] = p2["n_trades"]
+        metricas["win_rate_trades"] = p2["win_rate_trades"]
+        metricas["profit_factor_trades"] = p2["profit_factor_trades"]
+        metricas["lucro_medio_trade"] = p2["lucro_medio_trade"]
+        metricas["prejuizo_medio_trade"] = p2["prejuizo_medio_trade"]
+        secao_pagina2 = gerar_secao_pagina2(p2)
 
     p3 = calcular_metricas_pagina3(diario)
     grafico_dist_b64 = gerar_grafico_distribuicao(p3)
@@ -922,7 +961,7 @@ def _rodar_modo_robo(args):
     secao_robustez = gerar_secao_robustez(resumo_robustez, cenario_ativo, descricao_cenario)
 
     secao_pagina6 = ""
-    if ordens["Ativo"].map(extrair_raiz_ativo).nunique() > 1:
+    if not eh_resultados_diarios and ordens["Ativo"].map(extrair_raiz_ativo).nunique() > 1:
         p6 = calcular_metricas_pagina6(ordens)
         secao_pagina6 = gerar_secao_pagina6(p6)
 
@@ -948,18 +987,24 @@ def _rodar_modo_portfolio(args):
         margem_por_contrato = float(margem_por_contrato_str)
         n_contratos_robo = int(n_contratos_str)
         custo_mensal_robo = float(custo_mensal_str)
-        ordens = carregar_ordens(csv_path)
-        try:
-            contratos_referencia = detectar_contratos_referencia(ordens)
-        except ValueError:
-            por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=args.dias_recentes_deteccao)
-            contratos_referencia = sum(por_ativo.values())
-            composicao = " + ".join(f"{qtd} {ativo}" for ativo, qtd in sorted(por_ativo.items()))
-            print(
-                f"{nome_robo}: detecção sobre o histórico inteiro falhou -- detectado por ativo "
-                f"sobre os últimos {args.dias_recentes_deteccao} dias: {composicao} (total {contratos_referencia})."
-            )
-        diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+
+        if eh_formato_resultados_diarios(csv_path):
+            resultados_diarios = carregar_resultados_diarios(csv_path)
+            diario = montar_diario_resultados(resultados_diarios)
+            contratos_referencia = CONTRATOS_REFERENCIA_RESULTADOS_DIARIOS
+        else:
+            ordens = carregar_ordens(csv_path)
+            try:
+                contratos_referencia = detectar_contratos_referencia(ordens)
+            except ValueError:
+                por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=args.dias_recentes_deteccao)
+                contratos_referencia = sum(por_ativo.values())
+                composicao = " + ".join(f"{qtd} {ativo}" for ativo, qtd in sorted(por_ativo.items()))
+                print(
+                    f"{nome_robo}: detecção sobre o histórico inteiro falhou -- detectado por ativo "
+                    f"sobre os últimos {args.dias_recentes_deteccao} dias: {composicao} (total {contratos_referencia})."
+                )
+            diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
 
         # Reescala o robô inteiro para n_contratos_robo (não só a margem) --
         # mesma convenção linear de tradefolio.daily.escalar_por_contratos,

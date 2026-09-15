@@ -12,6 +12,7 @@ from tradefolio.versions import VERSOES
 
 ETAPAS_IMPLEMENTADAS = (
     "parser_ordens",
+    "ingestao_resultados_diarios",
     "validacao",
     "agregacao_diaria",
     "calendario_b3",

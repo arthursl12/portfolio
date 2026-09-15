@@ -1252,3 +1252,67 @@ janela recente, ou segmentação histórica completa).
   escolheu desta vez. Continua sendo o próximo passo natural se algum
   dia for preciso analisar corretamente um período PASSADO (não só a
   configuração atual) de um robô que mudou de proporção.
+
+---
+
+## Formato de resultado diário agregado (robôs sem exportação order-level, fora dos épicos do PDF-fonte)
+
+Pedido do usuário: um novo robô (TradingX,
+`dados_exemplo/daily_tradingx.csv`) não tem exportação order-level --
+só um resultado diário já agregado por pregão
+(`Data;Mes;Pontos;Resultado_R$;Saldo_Acumulado_R$`, sem detalhe de
+ordem/trade/contrato). Implementado em `src/tradefolio/daily_results.py`.
+`VERSOES["ingestao_resultados_diarios"]` = `"daily_results_v1"`.
+
+- [x] `carregar_resultados_diarios(csv_path)` -- lê o CSV (`;`, BOM
+  UTF-8, `Data` dd/mm/yyyy, `Resultado_R$` já numérico), levanta erro
+  para coluna obrigatória faltante ou datas duplicadas. `Mes`/`Pontos`/
+  `Saldo_Acumulado_R$` são ignorados (não fazem parte do que o pipeline
+  precisa).
+- [x] `montar_diario_resultados(resultados)` -- constrói um `diario` no
+  MESMO formato usado pelo resto do pipeline (`liquido`/
+  `liquido_por_contrato`/`operou`), alinhado ao calendário B3 real
+  (mesma convenção de `alignment.preencher_calendario_b3`; `operou`
+  derivado da presença da linha no arquivo, não de `n_trades`, que não
+  existe neste formato). Verificado contra o arquivo real: 174 linhas,
+  2026-01-06 a 2026-09-15, sem nenhum pregão B3 ausente nesse intervalo.
+- [x] `eh_formato_resultados_diarios(csv_path)` -- detecção pelo
+  cabeçalho (mesmo espírito de
+  `importers.SmarttbotOrderImporter.can_parse`), usada para escolher
+  automaticamente o caminho de ingestão certo em `app.py`/`report.py`
+  sem exigir um seletor de formato manual na UI.
+- [x] **Decisões de escala/convenção** (documentadas, não inventadas --
+  AGENTS.md §8):
+  - `bruto`/`custo`/`n_trades` ficam `NaN` no `diario` -- genuinamente
+    DESCONHECIDOS sem dado de ordem, nunca inventados como 0 (0 já
+    significa "sem custo B3", um fato diferente de "não sabemos o
+    custo"). Métricas que dependem deles (ex. `retorno_bruto_pct`)
+    degradam honestamente para "—" na UI, não um número fabricado.
+    Conferido: `Resultado_R$/Pontos` no arquivo real fica em torno de
+    0,20 (valor do ponto do WIN) mas não é exato (0,1989–0,2069),
+    consistente com algum custo/slippage já líquido em `Resultado_R$`
+    -- por isso ele é tratado como `liquido` diretamente, sem tentar
+    decompor mais.
+  - `contratos_referencia=1` fixo, NÃO detectado (não há "Quantidade
+    executada") -- **decisão confirmada com o usuário via
+    AskUserQuestion**: a série já representa 1 contrato, permitindo
+    escalar como os demais robôs (`daily.escalar_por_contratos`), não
+    um valor fixo não-escalável.
+  - Página 2 (métricas de trade -- Profit Factor, sequências, win rate)
+    é estruturalmente impossível para este formato (sem trade
+    reconstruído) -- nunca computada; `app.py` nunca mostrou página 2
+    de qualquer forma (só `report.py`, que agora mostra uma nota "não
+    disponível" no lugar). Página 6 (comparação entre ativos) também
+    pulada -- série única, sem múltiplos ativos por construção.
+  - Cenário de deterioração do Monte Carlo (`aumento_custos`/
+    `slippage`) desabilitado para este formato -- ambos dependem de
+    `bruto`/`custo`/`n_trades`; `report.py` levanta erro explícito se
+    o usuário tentar usar `--aumento-custos`/`--slippage` com um robô
+    deste formato, em vez de silenciosamente ignorar o parâmetro.
+- [x] Wireado em `app.py` (modo Robô único E modo Portfólio -- detecção
+  automática por arquivo, sem seletor de formato manual) e `report.py`
+  (CLI `robo` e `portfolio`, mesma detecção automática). Verificado com
+  o arquivo real: lucro líquido R$9.646,00 sozinho (via `AppTest` e CLI,
+  números idênticos); combinado com `orders_resgat.csv` na janela comum
+  (Épico 10): lucro R$14.472,00, MDD R$-2.512,00 -- conferido por script
+  independente e idêntico entre `app.py`/`report.py`.

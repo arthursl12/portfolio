@@ -30,6 +30,12 @@ from tradefolio.daily import (
     detectar_contratos_referencia_multi_ativo,
     escalar_por_contratos,
 )
+from tradefolio.daily_results import (
+    CONTRATOS_REFERENCIA_RESULTADOS_DIARIOS,
+    carregar_resultados_diarios,
+    eh_formato_resultados_diarios,
+    montar_diario_resultados,
+)
 from tradefolio.drawdowns import drawdown_corrente, episodios_drawdown, tempo_recuperacao_mediano
 from tradefolio.loaders import carregar_ordens
 from tradefolio.metric_registry import REGISTRO
@@ -253,32 +259,50 @@ def rodar_modo_portfolio():
     for arquivo in arquivos:
         nome_arquivo = getattr(arquivo, "name", str(arquivo))
         nome_robo = Path(nome_arquivo).stem
-        try:
-            ordens = carregar_ordens(arquivo)
-        except ValueError as erro:
-            st.error(f"{nome_robo}: CSV inválido: {erro}")
-            houve_erro = True
-            continue
 
-        try:
-            contratos_referencia = detectar_contratos_referencia(ordens)
-        except ValueError:
-            with st.sidebar:
-                st.warning(f"{nome_robo}: detecção sobre o histórico inteiro falhou -- tentando por ativo.")
-                dias_recentes = st.number_input(
-                    f"{nome_robo}: janela p/ config. atual (dias)", min_value=7, max_value=730,
-                    value=90, step=1, key=f"portfolio_dias_recentes::{nome_arquivo}",
-                )
+        if eh_formato_resultados_diarios(arquivo):
+            # Robô sem exportação order-level (ex. TradingX) -- só
+            # resultado diário já agregado. contratos_referencia=1 fixo
+            # (decisão do usuário, não detectada -- não há "Quantidade
+            # executada" neste formato). bruto/custo/n_trades ficam NaN
+            # no diario (genuinamente desconhecidos, ver
+            # tradefolio.daily_results).
             try:
-                contratos_referencia = detectar_contratos_referencia_multi_ativo(
-                    ordens, dias_recentes=int(dias_recentes)
-                )
+                resultados = carregar_resultados_diarios(arquivo)
+                diario = montar_diario_resultados(resultados)
             except ValueError as erro:
-                st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
+                st.error(f"{nome_robo}: CSV de resultados diários inválido: {erro}")
+                houve_erro = True
+                continue
+            contratos_referencia = CONTRATOS_REFERENCIA_RESULTADOS_DIARIOS
+        else:
+            try:
+                ordens = carregar_ordens(arquivo)
+            except ValueError as erro:
+                st.error(f"{nome_robo}: CSV inválido: {erro}")
                 houve_erro = True
                 continue
 
-        diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+            try:
+                contratos_referencia = detectar_contratos_referencia(ordens)
+            except ValueError:
+                with st.sidebar:
+                    st.warning(f"{nome_robo}: detecção sobre o histórico inteiro falhou -- tentando por ativo.")
+                    dias_recentes = st.number_input(
+                        f"{nome_robo}: janela p/ config. atual (dias)", min_value=7, max_value=730,
+                        value=90, step=1, key=f"portfolio_dias_recentes::{nome_arquivo}",
+                    )
+                try:
+                    contratos_referencia = detectar_contratos_referencia_multi_ativo(
+                        ordens, dias_recentes=int(dias_recentes)
+                    )
+                except ValueError as erro:
+                    st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
+                    houve_erro = True
+                    continue
+
+            diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+
         diarios_referencia[nome_robo] = diario
 
         with st.sidebar:
@@ -753,44 +777,61 @@ if arquivo_ordens is None:
     st.info("Envie um CSV ou escolha um robô de exemplo para ver a lâmina.")
     st.stop()
 
-try:
-    ordens = carregar_ordens(arquivo_ordens)
-except ValueError as erro:
-    st.error(f"CSV inválido: {erro}")
-    st.stop()
-
 chave_arquivo = getattr(arquivo_ordens, "name", str(arquivo_ordens))
+eh_resultados_diarios = eh_formato_resultados_diarios(arquivo_ordens)
 
+ordens = None
 deteccao_por_ativo = None
-try:
-    contratos_referencia = detectar_contratos_referencia(ordens)
-except ValueError:
-    # Robô multi-ativo com proporção fixa entre pernas (ex. Robô Raiz: 3
-    # WIN + 2 WDO por unidade) -- misturar as pernas numa única
-    # distribuição não detecta nada. Tenta por perna sobre uma janela
-    # recente (a proporção pode ter mudado historicamente e só a atual
-    # importa) antes de desistir.
-    with st.sidebar:
-        st.warning(
-            "Não foi possível detectar um único número de contratos sobre "
-            "o histórico inteiro -- tentando por ativo sobre uma janela recente."
-        )
-        dias_recentes_deteccao = st.number_input(
-            "Janela para detectar a configuração atual (dias)", min_value=7, max_value=730,
-            value=90, step=1, key=f"dias_recentes_deteccao::{chave_arquivo}",
-            help="Restringe a detecção da proporção entre ativos (ex. 3 WIN + 2 WDO) aos últimos N dias -- a proporção pode ter mudado no passado, e só a atual importa aqui.",
-        )
+
+if eh_resultados_diarios:
+    # Robô sem exportação order-level (ex. TradingX) -- só resultado
+    # diário já agregado. contratos_referencia=1 fixo (decisão do
+    # usuário, não detectada -- ver tradefolio.daily_results). Página de
+    # trade (nunca mostrada em app.py, só em report.py) e comparação
+    # entre ativos não se aplicam a este formato (série única, sem
+    # detalhe de ordem).
     try:
-        contratos_referencia = detectar_contratos_referencia_multi_ativo(
-            ordens, dias_recentes=int(dias_recentes_deteccao)
-        )
-        deteccao_por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=int(dias_recentes_deteccao))
+        resultados_diarios = carregar_resultados_diarios(arquivo_ordens)
     except ValueError as erro:
-        st.error(
-            f"Não foi possível determinar a configuração de contratos, nem por ativo "
-            f"sobre os últimos {int(dias_recentes_deteccao)} dias: {erro}"
-        )
+        st.error(f"CSV de resultados diários inválido: {erro}")
         st.stop()
+    contratos_referencia = CONTRATOS_REFERENCIA_RESULTADOS_DIARIOS
+else:
+    try:
+        ordens = carregar_ordens(arquivo_ordens)
+    except ValueError as erro:
+        st.error(f"CSV inválido: {erro}")
+        st.stop()
+
+    try:
+        contratos_referencia = detectar_contratos_referencia(ordens)
+    except ValueError:
+        # Robô multi-ativo com proporção fixa entre pernas (ex. Robô Raiz: 3
+        # WIN + 2 WDO por unidade) -- misturar as pernas numa única
+        # distribuição não detecta nada. Tenta por perna sobre uma janela
+        # recente (a proporção pode ter mudado historicamente e só a atual
+        # importa) antes de desistir.
+        with st.sidebar:
+            st.warning(
+                "Não foi possível detectar um único número de contratos sobre "
+                "o histórico inteiro -- tentando por ativo sobre uma janela recente."
+            )
+            dias_recentes_deteccao = st.number_input(
+                "Janela para detectar a configuração atual (dias)", min_value=7, max_value=730,
+                value=90, step=1, key=f"dias_recentes_deteccao::{chave_arquivo}",
+                help="Restringe a detecção da proporção entre ativos (ex. 3 WIN + 2 WDO) aos últimos N dias -- a proporção pode ter mudado no passado, e só a atual importa aqui.",
+            )
+        try:
+            contratos_referencia = detectar_contratos_referencia_multi_ativo(
+                ordens, dias_recentes=int(dias_recentes_deteccao)
+            )
+            deteccao_por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=int(dias_recentes_deteccao))
+        except ValueError as erro:
+            st.error(
+                f"Não foi possível determinar a configuração de contratos, nem por ativo "
+                f"sobre os últimos {int(dias_recentes_deteccao)} dias: {erro}"
+            )
+            st.stop()
 
 with st.sidebar:
     st.header("Filtros")
@@ -868,33 +909,46 @@ with st.sidebar:
         key=f"incluir_sem_op::{chave_arquivo}", help=AJUDA_INCLUIR_SEM_OPERACAO,
     )
 
-    with st.expander("Cenário de deterioração (opcional)"):
-        reducao_ganhos_pct = st.number_input(
-            "Redução dos ganhos (%)", min_value=0.0, max_value=100.0, value=0.0, step=5.0,
-            key=f"reducao_ganhos::{chave_arquivo}", help=AJUDA_REDUCAO_GANHOS,
+    reducao_ganhos_pct = aumento_perdas_pct = aumento_custos_pct = 0.0
+    slippage_valor = 0.0
+    remover_melhores_n = duplicar_piores_n = 0
+    if eh_resultados_diarios:
+        st.caption(
+            "Cenário de deterioração não disponível para este robô -- precisa de custo B3/"
+            "contagem de trades por dia, que este formato (resultado diário já agregado, "
+            "sem detalhe de ordem) não tem."
         )
-        aumento_perdas_pct = st.number_input(
-            "Ampliação das perdas (%)", min_value=0.0, value=0.0, step=5.0,
-            key=f"aumento_perdas::{chave_arquivo}", help=AJUDA_AUMENTO_PERDAS,
-        )
-        aumento_custos_pct = st.number_input(
-            "Aumento dos custos B3 (%)", min_value=0.0, value=0.0, step=10.0,
-            key=f"aumento_custos::{chave_arquivo}", help=AJUDA_AUMENTO_CUSTOS,
-        )
-        slippage_valor = st.number_input(
-            "Slippage adicional (R$/trade)", min_value=0.0, value=0.0, step=1.0,
-            key=f"slippage::{chave_arquivo}", help=AJUDA_SLIPPAGE,
-        )
-        remover_melhores_n = st.number_input(
-            "Remover N melhores dias", min_value=0, value=0, step=1,
-            key=f"remover_melhores::{chave_arquivo}", help=AJUDA_REMOVER_MELHORES,
-        )
-        duplicar_piores_n = st.number_input(
-            "Duplicar N piores dias", min_value=0, value=0, step=1,
-            key=f"duplicar_piores::{chave_arquivo}", help=AJUDA_DUPLICAR_PIORES,
-        )
+    else:
+        with st.expander("Cenário de deterioração (opcional)"):
+            reducao_ganhos_pct = st.number_input(
+                "Redução dos ganhos (%)", min_value=0.0, max_value=100.0, value=0.0, step=5.0,
+                key=f"reducao_ganhos::{chave_arquivo}", help=AJUDA_REDUCAO_GANHOS,
+            )
+            aumento_perdas_pct = st.number_input(
+                "Ampliação das perdas (%)", min_value=0.0, value=0.0, step=5.0,
+                key=f"aumento_perdas::{chave_arquivo}", help=AJUDA_AUMENTO_PERDAS,
+            )
+            aumento_custos_pct = st.number_input(
+                "Aumento dos custos B3 (%)", min_value=0.0, value=0.0, step=10.0,
+                key=f"aumento_custos::{chave_arquivo}", help=AJUDA_AUMENTO_CUSTOS,
+            )
+            slippage_valor = st.number_input(
+                "Slippage adicional (R$/trade)", min_value=0.0, value=0.0, step=1.0,
+                key=f"slippage::{chave_arquivo}", help=AJUDA_SLIPPAGE,
+            )
+            remover_melhores_n = st.number_input(
+                "Remover N melhores dias", min_value=0, value=0, step=1,
+                key=f"remover_melhores::{chave_arquivo}", help=AJUDA_REMOVER_MELHORES,
+            )
+            duplicar_piores_n = st.number_input(
+                "Duplicar N piores dias", min_value=0, value=0, step=1,
+                key=f"duplicar_piores::{chave_arquivo}", help=AJUDA_DUPLICAR_PIORES,
+            )
 
-diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+if eh_resultados_diarios:
+    diario = montar_diario_resultados(resultados_diarios)
+else:
+    diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
 diario = aplicar_custo_mensal(diario, tabela_custo_mensal, contratos_referencia)
 diario_filtrado = filtrar_por_janela(diario, janela)
 
@@ -1119,7 +1173,7 @@ with st.expander("Robustez (Monte Carlo)"):
         "aconteceram."
     )
 
-if ordens["Ativo"].map(extrair_raiz_ativo).nunique() > 1:
+if not eh_resultados_diarios and ordens["Ativo"].map(extrair_raiz_ativo).nunique() > 1:
     with st.expander("Comparação entre ativos"):
         p6 = calcular_pagina6(ordens)
         st.caption("Calculado sobre todo o histórico do CSV (não respeita o filtro de janela).")
