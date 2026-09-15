@@ -935,6 +935,42 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   `st.spinner` (feedback honesto de que algo está rodando) + a separação
   busca/seleção (elimina quase todo recálculo desnecessário) resolve o
   problema real sem essa complexidade.
+- [x] Fronteira de Pareto discreta (pedido de acompanhamento do usuário,
+  fora dos épicos do PDF-fonte) -- `portfolio.fronteira_pareto(resultados,
+  eixo_retorno, eixo_risco)`. Discutido com o usuário antes de
+  implementar: Markowitz (fronteira eficiente contínua, variância como
+  risco) foi considerado e descartado -- contratos são discretos neste
+  domínio (uma alocação contínua exigiria arredondar depois, podendo
+  violar a margem/limiar que a otimização deveria respeitar) e o projeto
+  inteiro já usa MDD/ES/limiar como vocabulário de risco, não variância/
+  Sharpe -- Markowitz seria bifurcar a filosofia de risco, não estendê-la.
+  Uma fronteira de Pareto discreta não precisa de nenhuma convenção nova:
+  roda sobre os resultados que `buscar_combinacoes_portfolio` JÁ
+  calculou (nenhuma busca nova), identificando as combinações que nenhuma
+  outra domina simultaneamente nos dois eixos escolhidos. Algoritmo
+  skyline O(n log n) (não O(n²) par-a-par), relevante pelo limite de até
+  20.000 combinações da busca. Convenção "maior é melhor" nos dois eixos
+  -- os campos de risco já existentes (mdd/es_95/mdd_sobre_limiar) já são
+  negativos nesta base de código, então "maior" = "menos negativo" =
+  mais seguro, sem precisar inverter sinal.
+  Wireado em `app.py` (dentro do expander de otimização, com 3 pares de
+  eixos pré-definidos -- Lucro×MDD, Lucro×ES95, RLT×MDD/limiar --
+  `st.scatter_chart` colorindo os pontos na fronteira, mais uma tabela
+  só com as combinações não-dominadas). Verificado contra dados reais
+  (resgat+gridhedge+romanos2): fronteira Lucro×MDD tem 4 das 11
+  combinações testadas; fronteira RLT×MDD/limiar tem 5 -- ambas
+  conferidas por script antes dos testes e idênticas ao resultado do
+  `AppTest`.
+- [ ] Monte Carlo P95/P99 (MDD ou ES) como objetivo/verificação do
+  otimizador -- discutido, não implementado ainda. Rodar Monte Carlo em
+  CADA combinação da busca é caro demais (mesma razão já documentada
+  para "minimizar pior cenário deteriorado" em `otimizar_portfolio`);
+  o caminho combinado com o usuário é rodar `robustez_portfolio` só nas
+  poucas combinações que sobram depois da busca barata (ex. as que estão
+  na fronteira de Pareto), não em todas. Também falta um gap concreto:
+  `monte_carlo.resumo_trajetorias` hoje calcula percentis de MDD e lucro
+  das trajetórias, mas não um percentil de ES -- precisaria ser
+  adicionado se quisermos "ES simulado", não só "MDD simulado".
 
 ---
 

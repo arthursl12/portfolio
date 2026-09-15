@@ -602,3 +602,49 @@ def otimizar_portfolio(
         percentil_cauda, fracao_reserva_operacional, increment, usar_janela_comum,
     )
     return selecionar_melhores_combinacoes(resultados, objetivo, limite_mdd, top_n)
+
+
+def fronteira_pareto(resultados: list, eixo_retorno: str, eixo_risco: str) -> list:
+    """Fronteira de Pareto DISCRETA (pedido de acompanhamento do usuário,
+    fora dos épicos do PDF-fonte) sobre combinações já calculadas por
+    `buscar_combinacoes_portfolio` -- nenhuma busca nova, só um
+    reprocessamento barato do que já existe (mesma filosofia de
+    `selecionar_melhores_combinacoes`).
+
+    Markowitz (fronteira eficiente contínua, variância como medida de
+    risco) foi considerado e descartado -- discutido com o usuário: os
+    contratos deste domínio são discretos (uma alocação contínua
+    exigiria arredondar depois, o que pode violar exatamente a margem/
+    limiar que a otimização deveria respeitar), e o projeto inteiro já
+    usa MDD/ES/limiar como vocabulário de risco, não variância/Sharpe --
+    introduzir Markowitz seria bifurcar a filosofia de risco, não
+    estendê-la. Uma fronteira de Pareto discreta não tem esse problema:
+    funciona com QUALQUER par de campos já presentes nos resultados
+    (`lucro_total`, `mdd`, `es_95`, `rlt_acumulado`, `mdd_sobre_limiar`),
+    sem nenhuma convenção nova.
+
+    Convenção: "maior é melhor" nos DOIS eixos. Os campos de risco já
+    existentes (`mdd`/`es_95`/`mdd_sobre_limiar`) já são negativos nesta
+    base de código -- "maior" = "menos negativo" = mais seguro, então
+    passar esses campos diretamente já funciona, sem inverter sinal.
+
+    Uma combinação está na fronteira quando NENHUMA outra combinação é
+    simultaneamente igual-ou-melhor nos dois eixos E estritamente melhor
+    em pelo menos um (dominância de Pareto padrão). Algoritmo O(n log n)
+    (skyline: ordena por `eixo_retorno` decrescente, varre mantendo o
+    melhor `eixo_risco` já visto) em vez de comparação par-a-par O(n²) --
+    relevante porque a busca pode ter até `_LIMITE_COMBINACOES_OTIMIZACAO`
+    combinações. Combinações com valores IDÊNTICOS nos dois eixos contam
+    como uma só (a primeira encontrada representa as demais -- duplicatas
+    exatas não são mais "não-dominadas" entre si do que uma cópia de si
+    mesma, e listar todas adicionaria ruído sem informação nova)."""
+    if not resultados:
+        return []
+    ordenados = sorted(resultados, key=lambda r: (r[eixo_retorno], r[eixo_risco]), reverse=True)
+    fronteira = []
+    melhor_risco_ate_agora = -math.inf
+    for r in ordenados:
+        if r[eixo_risco] > melhor_risco_ate_agora:
+            fronteira.append(r)
+            melhor_risco_ate_agora = r[eixo_risco]
+    return fronteira

@@ -49,6 +49,7 @@ from tradefolio.portfolio import (
     correlacao_piores_dias,
     correlacao_portfolio,
     correlacao_volatilidade_alta,
+    fronteira_pareto,
     limiar_agregado_portfolio,
     metricas_agregadas,
     restringir_janela_comum,
@@ -691,6 +692,52 @@ def rodar_modo_portfolio():
                             for r in resultado_otimizacao["melhores"]
                         ])
                         st.table(tabela_otimizacao)
+
+                st.subheader("Fronteira de Pareto (discreta)")
+                st.caption(
+                    "Combinações já calculadas que NENHUMA outra combinação supera nos dois eixos "
+                    "ao mesmo tempo -- não recalcula nada, só reprocessa a busca acima. Markowitz "
+                    "(fronteira contínua, variância como risco) não encaixa aqui: contratos são "
+                    "discretos e este app já usa MDD/ES/limiar como risco, não variância -- ver "
+                    "docstring de tradefolio.portfolio.fronteira_pareto para a discussão completa."
+                )
+                eixos_pareto = {
+                    "Lucro vs MDD": ("lucro_total", "mdd"),
+                    "Lucro vs ES95": ("lucro_total", "es_95"),
+                    "RLT vs MDD/limiar": ("rlt_acumulado", "mdd_sobre_limiar"),
+                }
+                par_escolhido = st.radio(
+                    "Eixos", list(eixos_pareto.keys()), key="portfolio_eixos_pareto", horizontal=True,
+                )
+                eixo_retorno, eixo_risco = eixos_pareto[par_escolhido]
+
+                fronteira = fronteira_pareto(resultados_busca, eixo_retorno, eixo_risco)
+                ids_fronteira = {id(r) for r in fronteira}
+                rotulo_retorno, rotulo_risco = par_escolhido.split(" vs ")
+                grafico_pareto = pd.DataFrame([
+                    {
+                        rotulo_risco: r[eixo_risco],
+                        rotulo_retorno: r[eixo_retorno],
+                        "Na fronteira": "Sim" if id(r) in ids_fronteira else "Não",
+                    }
+                    for r in resultados_busca
+                ])
+                st.scatter_chart(grafico_pareto, x=rotulo_risco, y=rotulo_retorno, color="Na fronteira")
+
+                tabela_pareto = pd.DataFrame([
+                    {
+                        **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                        rotulo_retorno: fmt(r[eixo_retorno], 4 if "rlt" in eixo_retorno else 2),
+                        rotulo_risco: fmt(r[eixo_risco], 4 if "limiar" in eixo_risco else 2),
+                    }
+                    for r in fronteira
+                ])
+                st.table(tabela_pareto)
+                st.caption(
+                    f"{len(fronteira)} de {len(resultados_busca)} combinações calculadas estão na "
+                    "fronteira -- as demais têm pelo menos uma outra combinação igual ou melhor nos "
+                    "dois eixos ao mesmo tempo."
+                )
 
         with st.expander("Robustez (Monte Carlo) do portfólio"):
             st.caption(

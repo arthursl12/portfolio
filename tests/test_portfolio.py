@@ -54,6 +54,7 @@ from tradefolio.portfolio import (
     correlacao_portfolio,
     correlacao_volatilidade_alta,
     buscar_combinacoes_portfolio,
+    fronteira_pareto,
     limiar_agregado_portfolio,
     metricas_agregadas,
     otimizar_portfolio,
@@ -556,3 +557,65 @@ def test_robustez_portfolio_sem_minimum_margin_ou_limiar_omite_chaves():
     resumo = robustez_portfolio(largo, tamanho_bloco=20, n_trajetorias=100, horizonte=50, seed=1)
     assert "probabilidade_toca_margem" not in resumo
     assert "probabilidade_termina_abaixo_do_limiar" not in resumo
+
+
+# --- Fronteira de Pareto discreta (pedido de acompanhamento do usuário,
+# fora dos épicos do PDF-fonte) -----------------------------------------
+#
+# Discutido com o usuário antes de implementar: Markowitz (pesos
+# contínuos, variância como risco) não encaixa neste domínio (contratos
+# são discretos; o projeto inteiro já usa MDD/ES/limiar como vocabulário
+# de risco, não variância/Sharpe). A fronteira de Pareto DISCRETA, sobre
+# as combinações que `buscar_combinacoes_portfolio` já calcula, não
+# precisa de nenhuma convenção nova: só identifica quais combinações já
+# testadas não são dominadas por nenhuma outra (nenhuma outra é
+# simultaneamente igual/melhor nos dois eixos e estritamente melhor em
+# pelo menos um). Convenção "maior é melhor" nos dois eixos -- eixos de
+# risco (mdd/es_95/mdd_sobre_limiar) já são negativos nesta base de
+# código, então "maior" = "menos negativo" = mais seguro, sem precisar
+# inverter sinal. Valores conferidos por script antes destes testes.
+
+
+def test_fronteira_pareto_lucro_vs_mdd():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+    fronteira = fronteira_pareto(resultados, eixo_retorno="lucro_total", eixo_risco="mdd")
+
+    alocacoes = [r["alocacao"] for r in fronteira]
+    assert alocacoes == [
+        {"resgat": 6, "gridhedge": 1, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 1, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 0},
+    ]
+    # dominada por {resgat:3, gridhedge:1, romanos2:2} (lucro maior E mdd
+    # melhor) -- não deve aparecer na fronteira.
+    assert {"resgat": 6, "gridhedge": 0, "romanos2": 2} not in alocacoes
+
+
+def test_fronteira_pareto_rlt_vs_mdd_sobre_limiar():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+    fronteira = fronteira_pareto(resultados, eixo_retorno="rlt_acumulado", eixo_risco="mdd_sobre_limiar")
+
+    alocacoes = [r["alocacao"] for r in fronteira]
+    assert alocacoes == [
+        {"resgat": 6, "gridhedge": 0, "romanos2": 0},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 0},
+        {"resgat": 0, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 1, "romanos2": 2},
+    ]
+
+
+def test_fronteira_pareto_vazia_para_lista_vazia():
+    assert fronteira_pareto([], eixo_retorno="lucro_total", eixo_risco="mdd") == []
+
+
+def test_fronteira_pareto_um_unico_resultado_sempre_esta_na_fronteira():
+    resultado = {"alocacao": {"a": 1}, "lucro_total": 100.0, "mdd": -10.0}
+    assert fronteira_pareto([resultado], eixo_retorno="lucro_total", eixo_risco="mdd") == [resultado]
