@@ -351,25 +351,30 @@ _OBJETIVOS_OTIMIZACAO = (
 _LIMITE_COMBINACOES_OTIMIZACAO = 20000
 
 
-def otimizar_portfolio(
+def buscar_combinacoes_portfolio(
     diarios_referencia: dict,
     margens_por_contrato: dict,
     candidatos_contratos: dict,
-    objetivo: str,
-    limite_mdd: float = None,
     percentil_cauda: int = 95,
     fracao_reserva_operacional: float = 0.0,
     increment: float = None,
-    top_n: int = 10,
     usar_janela_comum: bool = True,
-) -> dict:
-    """Tarefa 10.8 -- busca discreta (NÃO otimização contínua, o PDF-fonte
-    pede isso explicitamente) sobre combinações de número de contratos
-    por robô. `0` é um candidato válido em `candidatos_contratos` --
-    exclui aquele robô inteiramente do portfólio para aquela combinação
-    (pedido explícito do usuário: "tirar um robô também é uma
-    possibilidade"; não incluído automaticamente -- o chamador decide se
-    0 entra na lista de candidatos de cada robô).
+) -> list[dict]:
+    """Tarefa 10.8, a parte CARA da busca discreta (NÃO otimização
+    contínua, o PDF-fonte pede isso explicitamente): calcula TODAS as
+    métricas relevantes (lucro, MDD, ES95, limiar, RLT acumulado, MDD/
+    limiar) para CADA combinação candidata de número de contratos por
+    robô, sem aplicar nenhum objetivo, filtro ou ordenação -- isso é
+    responsabilidade de `selecionar_melhores_combinacoes`, deliberadamente
+    separada (pedido de acompanhamento do usuário: trocar de objetivo na
+    UI não deveria recalcular a busca inteira, só reordenar/filtrar a
+    tabela já pronta -- a parte lenta roda uma vez).
+
+    `0` é um candidato válido em `candidatos_contratos` -- exclui aquele
+    robô inteiramente do portfólio para aquela combinação (pedido
+    explícito do usuário: "tirar um robô também é uma possibilidade";
+    não incluído automaticamente -- o chamador decide se 0 entra na
+    lista de candidatos de cada robô).
 
     `diarios_referencia`: {nome: diario} na escala de referência
     (`liquido_por_contrato`, invariante ao número de contratos simulado
@@ -385,46 +390,17 @@ def otimizar_portfolio(
     puro. Quem quiser o efeito do custo mensal aplica a tabela sobre a
     alocação vencedora depois, fora desta função.
 
-    Objetivos suportados (dos 6 do PDF-fonte, só os que NÃO dependem de
-    uma política de vapo para o portfólio -- decisão ainda não tomada,
-    ver `rlt_e_risco_portfolio`):
-    - "maximizar_rlt": maior RLT acumulado da combinação.
-    - "minimizar_mdd_sobre_limiar": menor |MDD/limiar| (mais seguro,
-      mais perto de zero -- NÃO o valor mais negativo, que seria pior).
-    - "maximizar_lucro_com_limite_mdd": maior lucro total entre as
-      combinações cujo MDD não é pior que `limite_mdd` (obrigatório para
-      este objetivo -- nunca inventado, AGENTS.md §8).
-    Deliberadamente NÃO implementados: "maximizar VLT" e "maximizar vapo
-    com limite de capital" (precisam de uma política de vapo escolhida
-    PARA O PORTFÓLIO, não pedida ainda) e "minimizar pior cenário
-    deteriorado" (precisaria rodar Monte Carlo + deterioração para cada
-    combinação testada -- caro e uma decisão de escopo própria).
-
-    `top_n`: retorna as `top_n` melhores combinações, não só a primeira
-    -- o PDF-fonte pede explicitamente para NUNCA reportar só o melhor
-    resultado da amostra (risco de sobreajuste de busca com muitas
-    tentativas). `n_combinacoes_testadas` no resultado deixa esse risco
-    visível para quem consome (quanto mais combinações, maior a chance
-    do "melhor" ser sorte de amostra, não edge real).
-
     `usar_janela_comum=True` (padrão -- pedido de acompanhamento do
     usuário): cada combinação testada é restringida à SUA PRÓPRIA janela
     comum (`restringir_janela_comum`) antes de ser pontuada -- diferentes
     combinações têm janelas comuns diferentes, já que excluir um robô
     (candidato 0) muda quem precisa coexistir. Combinações cuja janela
-    comum ficaria vazia são puladas (mesmo tratamento de "sem
-    combinações válidas" já existente). Passe `False` para preservar o
+    comum ficaria vazia são puladas. Passe `False` para preservar o
     comportamento antigo (união com skipna).
 
     Levanta `ValueError` se o total de combinações exceder
     `_LIMITE_COMBINACOES_OTIMIZACAO` (busca discreta não escala para
-    muitas combinações -- reduza os candidatos por robô) ou se nenhuma
-    combinação satisfizer as restrições do objetivo escolhido."""
-    if objetivo not in _OBJETIVOS_OTIMIZACAO:
-        raise ValueError(f"objetivo deve ser um de {_OBJETIVOS_OTIMIZACAO}, recebido {objetivo!r}")
-    if objetivo == "maximizar_lucro_com_limite_mdd" and limite_mdd is None:
-        raise ValueError("limite_mdd é obrigatório para o objetivo 'maximizar_lucro_com_limite_mdd'")
-
+    muitas combinações -- reduza os candidatos por robô)."""
     nomes = list(diarios_referencia.keys())
     listas_candidatos = [candidatos_contratos[nome] for nome in nomes]
 
@@ -460,40 +436,116 @@ def otimizar_portfolio(
                 continue
         agregadas = metricas_agregadas(largo)
 
-        if objetivo == "maximizar_lucro_com_limite_mdd":
-            if agregadas["mdd"] < limite_mdd:
-                continue
-            score = agregadas["lucro_total"]
-        else:
-            score = None
-
         limiar = limiar_agregado_portfolio(
             largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
         )
         limiar_ativo = limiar.get("limiar_recomendado", limiar["limiar_bruto"])
-
-        if score is None:
-            rlt = rlt_e_risco_portfolio(largo, limiar=limiar_ativo)
-            score = rlt["rlt_acumulado"] if objetivo == "maximizar_rlt" else -abs(rlt["mdd_sobre_limiar"])
+        rlt = rlt_e_risco_portfolio(largo, limiar=limiar_ativo)
 
         resultados.append({
             "alocacao": alocacao,
-            "score": score,
             "lucro_total": agregadas["lucro_total"],
             "mdd": agregadas["mdd"],
             "es_95": agregadas["es_95"],
             "limiar_ativo": limiar_ativo,
+            "rlt_acumulado": rlt["rlt_acumulado"],
+            "mdd_sobre_limiar": rlt["mdd_sobre_limiar"],
         })
 
-    if not resultados:
+    return resultados
+
+
+def selecionar_melhores_combinacoes(
+    resultados: list[dict],
+    objetivo: str,
+    limite_mdd: float = None,
+    top_n: int = 10,
+) -> dict:
+    """Tarefa 10.8, a parte BARATA da busca discreta -- ordena/filtra
+    combinações já calculadas por `buscar_combinacoes_portfolio` segundo
+    `objetivo`. NÃO recalcula nenhuma métrica, só reordena/filtra a lista
+    já pronta -- isso é o que permite trocar de objetivo (ex. na UI) sem
+    refazer a busca inteira.
+
+    Objetivos suportados (dos 6 do PDF-fonte, só os que NÃO dependem de
+    uma política de vapo para o portfólio -- decisão ainda não tomada,
+    ver `rlt_e_risco_portfolio`):
+    - "maximizar_rlt": maior RLT acumulado da combinação.
+    - "minimizar_mdd_sobre_limiar": menor |MDD/limiar| (mais seguro,
+      mais perto de zero -- NÃO o valor mais negativo, que seria pior).
+    - "maximizar_lucro_com_limite_mdd": maior lucro total entre as
+      combinações cujo MDD não é pior que `limite_mdd` (obrigatório para
+      este objetivo -- nunca inventado, AGENTS.md §8).
+    Deliberadamente NÃO implementados: "maximizar VLT" e "maximizar vapo
+    com limite de capital" (precisam de uma política de vapo escolhida
+    PARA O PORTFÓLIO, não pedida ainda) e "minimizar pior cenário
+    deteriorado" (precisaria rodar Monte Carlo + deterioração para cada
+    combinação testada -- caro e uma decisão de escopo própria).
+
+    `top_n`: retorna as `top_n` melhores combinações, não só a primeira
+    -- o PDF-fonte pede explicitamente para NUNCA reportar só o melhor
+    resultado da amostra (risco de sobreajuste de busca com muitas
+    tentativas). `n_combinacoes_testadas` no resultado deixa esse risco
+    visível para quem consome (quanto mais combinações, maior a chance
+    do "melhor" ser sorte de amostra, não edge real) -- para
+    "maximizar_lucro_com_limite_mdd" já reflete só as combinações que
+    satisfazem `limite_mdd`, não o total bruto testado por
+    `buscar_combinacoes_portfolio`.
+
+    Levanta `ValueError` se `objetivo` for desconhecido, se
+    `limite_mdd` faltar para "maximizar_lucro_com_limite_mdd", ou se
+    nenhuma combinação satisfizer as restrições do objetivo escolhido."""
+    if objetivo not in _OBJETIVOS_OTIMIZACAO:
+        raise ValueError(f"objetivo deve ser um de {_OBJETIVOS_OTIMIZACAO}, recebido {objetivo!r}")
+    if objetivo == "maximizar_lucro_com_limite_mdd" and limite_mdd is None:
+        raise ValueError("limite_mdd é obrigatório para o objetivo 'maximizar_lucro_com_limite_mdd'")
+
+    if objetivo == "maximizar_lucro_com_limite_mdd":
+        validos = [r for r in resultados if r["mdd"] >= limite_mdd]
+        chave = lambda r: r["lucro_total"]
+    elif objetivo == "maximizar_rlt":
+        validos = resultados
+        chave = lambda r: r["rlt_acumulado"]
+    else:  # minimizar_mdd_sobre_limiar
+        validos = resultados
+        chave = lambda r: -abs(r["mdd_sobre_limiar"])
+
+    if not validos:
         raise ValueError(
             "Nenhuma combinação testada satisfaz as restrições do objetivo escolhido "
             f"({objetivo}, limite_mdd={limite_mdd})"
         )
 
-    resultados.sort(key=lambda r: r["score"], reverse=True)
+    ordenados = sorted(validos, key=chave, reverse=True)
+    melhores = [dict(r, score=chave(r)) for r in ordenados[:top_n]]
     return {
         "objetivo": objetivo,
-        "n_combinacoes_testadas": len(resultados),
-        "melhores": resultados[:top_n],
+        "n_combinacoes_testadas": len(validos),
+        "melhores": melhores,
     }
+
+
+def otimizar_portfolio(
+    diarios_referencia: dict,
+    margens_por_contrato: dict,
+    candidatos_contratos: dict,
+    objetivo: str,
+    limite_mdd: float = None,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = None,
+    top_n: int = 10,
+    usar_janela_comum: bool = True,
+) -> dict:
+    """Atalho de conveniência (tarefa 10.8) -- roda
+    `buscar_combinacoes_portfolio` e `selecionar_melhores_combinacoes`
+    numa chamada só, mesmo comportamento de antes desta função ter sido
+    dividida em duas. Quem for trocar de objetivo repetidamente (ex. um
+    seletor na UI) deve chamar `buscar_combinacoes_portfolio` uma vez e
+    `selecionar_melhores_combinacoes` a cada troca, para não recalcular a
+    busca inteira a cada clique."""
+    resultados = buscar_combinacoes_portfolio(
+        diarios_referencia, margens_por_contrato, candidatos_contratos,
+        percentil_cauda, fracao_reserva_operacional, increment, usar_janela_comum,
+    )
+    return selecionar_melhores_combinacoes(resultados, objetivo, limite_mdd, top_n)

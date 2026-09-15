@@ -882,6 +882,28 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   pedido, mas exigiria uma superfície de argumentos própria (faixas de
   candidatos por robô) em vez de reusar `--robo CSV MARGEM N_CONTRATOS
   CUSTO_MENSAL` como está.
+- [x] Pedido de acompanhamento do usuário: busca (cara) e seleção por
+  objetivo (barata) separadas em duas funções --
+  `buscar_combinacoes_portfolio` (calcula lucro/MDD/ES95/limiar/RLT
+  acumulado/MDD-sobre-limiar para TODAS as combinações, sem aplicar
+  objetivo nenhum) e `selecionar_melhores_combinacoes` (ordena/filtra o
+  que já foi calculado -- não recalcula nada). `otimizar_portfolio`
+  virou um atalho que chama as duas em sequência (comportamento idêntico
+  a antes, todos os testes antigos passam sem alteração -- refatoração
+  comportamento-preservando). Em `app.py`, "Buscar combinações" roda a
+  parte cara uma vez (dentro de `st.spinner`, guardada em
+  `st.session_state`); trocar o objetivo (ou o limite de MDD) depois só
+  reordena a tabela já pronta, sem recalcular -- um aviso aparece se os
+  candidatos/margens/escopo mudarem desde a última busca, sem forçar
+  recálculo automático. Threading avaliado e descartado para este caso:
+  o modelo de execução do Streamlit (rerun síncrono do script inteiro a
+  cada interação) não tem um jeito simples e robusto de manter uma
+  thread rodando em background enquanto o resto da UI continua
+  interativa (exigiria polling de `session_state` + propagação manual de
+  contexto via `add_script_run_ctx`, um padrão avançado e frágil) --
+  `st.spinner` (feedback honesto de que algo está rodando) + a separação
+  busca/seleção (elimina quase todo recálculo desnecessário) resolve o
+  problema real sem essa complexidade.
 
 ---
 

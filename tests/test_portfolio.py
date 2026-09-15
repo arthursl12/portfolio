@@ -53,10 +53,12 @@ from tradefolio.portfolio import (
     correlacao_piores_dias,
     correlacao_portfolio,
     correlacao_volatilidade_alta,
+    buscar_combinacoes_portfolio,
     limiar_agregado_portfolio,
     metricas_agregadas,
     otimizar_portfolio,
     restringir_janela_comum,
+    selecionar_melhores_combinacoes,
     rlt_e_risco_portfolio,
     serie_combinada,
     sincronizar_operou,
@@ -434,3 +436,70 @@ def test_otimizar_portfolio_sem_combinacao_valida_levanta_erro():
             diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
             objetivo="maximizar_lucro_com_limite_mdd", limite_mdd=-1000.0, **_PARAMS_10_8,
         )
+
+
+# --- Separação busca/seleção (pedido de acompanhamento do usuário): a
+# busca (cara, uma varredura completa) e a seleção por objetivo (barata,
+# só ordena/filtra o que já foi calculado) são funções diferentes -- assim
+# trocar de objetivo na UI não recalcula a busca inteira, só reordena a
+# tabela já pronta. `otimizar_portfolio` continua existindo como atalho
+# que faz as duas coisas numa chamada só (mesmo comportamento de antes).
+
+
+def test_buscar_combinacoes_portfolio_traz_todas_as_metricas_sem_objetivo():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+    assert len(resultados) == 11
+    for r in resultados:
+        assert set(r) >= {
+            "alocacao", "lucro_total", "mdd", "es_95",
+            "limiar_ativo", "rlt_acumulado", "mdd_sobre_limiar",
+        }
+        assert "score" not in r  # score é conceito de seleção, não de busca
+
+
+def test_selecionar_melhores_combinacoes_reordena_sem_recalcular():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+
+    por_rlt = selecionar_melhores_combinacoes(resultados, objetivo="maximizar_rlt")
+    assert por_rlt["melhores"][0]["alocacao"] == {"resgat": 6, "gridhedge": 0, "romanos2": 0}
+    assert por_rlt["melhores"][0]["score"] == pytest.approx(3.330857142857143, abs=1e-6)
+
+    por_risco = selecionar_melhores_combinacoes(resultados, objetivo="minimizar_mdd_sobre_limiar")
+    assert por_risco["melhores"][0]["alocacao"] == {"resgat": 3, "gridhedge": 1, "romanos2": 2}
+    assert por_risco["melhores"][0]["score"] == pytest.approx(-0.193, abs=1e-6)
+
+    por_lucro = selecionar_melhores_combinacoes(
+        resultados, objetivo="maximizar_lucro_com_limite_mdd", limite_mdd=-3000.0,
+    )
+    assert por_lucro["melhores"][0]["alocacao"] == {"resgat": 3, "gridhedge": 0, "romanos2": 2}
+    assert por_lucro["melhores"][0]["lucro_total"] == pytest.approx(28268.5, abs=1e-2)
+
+
+def test_selecionar_melhores_combinacoes_exige_limite_mdd():
+    with pytest.raises(ValueError, match="limite_mdd"):
+        selecionar_melhores_combinacoes([{}], objetivo="maximizar_lucro_com_limite_mdd")
+
+
+def test_selecionar_melhores_combinacoes_objetivo_invalido():
+    with pytest.raises(ValueError, match="objetivo"):
+        selecionar_melhores_combinacoes([{}], objetivo="maximizar_foo")
+
+
+def test_otimizar_portfolio_equivale_a_busca_mais_selecao():
+    diarios = _diarios_reais()
+    direto = otimizar_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        objetivo="maximizar_rlt", **_PARAMS_10_8,
+    )
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+    composto = selecionar_melhores_combinacoes(resultados, objetivo="maximizar_rlt")
+    assert direto["melhores"][0]["alocacao"] == composto["melhores"][0]["alocacao"]
+    assert direto["n_combinacoes_testadas"] == composto["n_combinacoes_testadas"]

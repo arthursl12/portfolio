@@ -35,6 +35,7 @@ from tradefolio.loaders import carregar_ordens
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
     beneficio_diversificacao,
+    buscar_combinacoes_portfolio,
     contribuicao_marginal,
     correlacao_dias_conjuntos,
     correlacao_movel,
@@ -44,9 +45,9 @@ from tradefolio.portfolio import (
     correlacao_volatilidade_alta,
     limiar_agregado_portfolio,
     metricas_agregadas,
-    otimizar_portfolio,
     restringir_janela_comum,
     rlt_e_risco_portfolio,
+    selecionar_melhores_combinacoes,
     sincronizar_operou,
     sincronizar_portfolio,
 )
@@ -540,66 +541,108 @@ def rodar_modo_portfolio():
                 "candidato válido -- excluir um robô inteiramente do portfólio também é testado "
                 "quando \"permitir excluir\" está marcado (barra lateral, por robô). Custo mensal "
                 "não entra nesta busca (simplificação documentada -- ver docstring de "
-                "tradefolio.portfolio.otimizar_portfolio)."
+                "tradefolio.portfolio.buscar_combinacoes_portfolio)."
             )
-            objetivo_rotulo = st.radio(
-                "Objetivo", ["Maximizar RLT", "Minimizar risco (|MDD| / limiar)", "Maximizar lucro (com limite de MDD)"],
-                key="portfolio_objetivo_otimizacao",
-            )
-            objetivo_map = {
-                "Maximizar RLT": "maximizar_rlt",
-                "Minimizar risco (|MDD| / limiar)": "minimizar_mdd_sobre_limiar",
-                "Maximizar lucro (com limite de MDD)": "maximizar_lucro_com_limite_mdd",
-            }
-            objetivo_otimizacao = objetivo_map[objetivo_rotulo]
-
-            limite_mdd = None
-            if objetivo_otimizacao == "maximizar_lucro_com_limite_mdd":
-                limite_mdd = st.number_input(
-                    "Limite de MDD (R$, negativo -- ex. -5000)", max_value=0.0, value=None,
-                    step=500.0, key="portfolio_limite_mdd",
-                    help="Só combinações cujo MDD não seja pior que este valor entram na busca -- "
-                         "obrigatório para este objetivo, nunca inventado.",
-                )
 
             n_total_candidatos = 1
             for lista in candidatos_contratos.values():
                 n_total_candidatos *= len(lista)
             st.caption(f"{n_total_candidatos} combinações a testar (ajuste os candidatos por robô na barra lateral).")
 
-            pode_rodar = objetivo_otimizacao != "maximizar_lucro_com_limite_mdd" or limite_mdd is not None
-            if st.button("Rodar otimização", disabled=not pode_rodar):
-                try:
-                    resultado_otimizacao = otimizar_portfolio(
-                        diarios_referencia, margens_por_contrato, candidatos_contratos,
-                        objetivo=objetivo_otimizacao, limite_mdd=limite_mdd,
-                        percentil_cauda=percentil_cauda,
-                        fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
-                        increment=increment, usar_janela_comum=usar_janela_comum,
+            # Busca (cara) e seleção por objetivo (barata) são passos
+            # separados -- pedido de acompanhamento do usuário: rodar a
+            # busca inteira de novo a cada troca de objetivo faria a UI
+            # parecer travada sem necessidade, já que a única coisa que
+            # muda é a ordenação/filtro de uma tabela já calculada.
+            chave_busca_atual = (
+                tuple(sorted((n, tuple(c)) for n, c in candidatos_contratos.items())),
+                tuple(sorted(margens_por_contrato.items())),
+                percentil_cauda, fracao_reserva_operacional_pct, increment, usar_janela_comum,
+            )
+            busca_desatualizada = st.session_state.get("portfolio_chave_busca") != chave_busca_atual
+
+            if st.button("Buscar combinações", icon=":material/search:"):
+                with st.spinner(f"Calculando {n_total_candidatos} combinações..."):
+                    try:
+                        resultados_busca = buscar_combinacoes_portfolio(
+                            diarios_referencia, margens_por_contrato, candidatos_contratos,
+                            percentil_cauda=percentil_cauda,
+                            fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
+                            increment=increment, usar_janela_comum=usar_janela_comum,
+                        )
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    else:
+                        st.session_state["portfolio_resultados_busca"] = resultados_busca
+                        st.session_state["portfolio_chave_busca"] = chave_busca_atual
+                        busca_desatualizada = False
+
+            resultados_busca = st.session_state.get("portfolio_resultados_busca")
+            if resultados_busca is None:
+                st.info(
+                    "Clique em \"Buscar combinações\" para calcular -- pode levar alguns segundos "
+                    "dependendo do número de combinações. Depois disso, trocar o objetivo abaixo "
+                    "só reordena a tabela já calculada, sem recalcular nada."
+                )
+            else:
+                if busca_desatualizada:
+                    st.warning(
+                        "Os candidatos, margens ou escopo temporal mudaram desde a última busca -- "
+                        "a tabela abaixo ainda reflete a busca anterior. Clique em \"Buscar "
+                        "combinações\" de novo para atualizar."
                     )
-                except ValueError as erro:
-                    st.error(str(erro))
+
+                objetivo_rotulo = st.radio(
+                    "Objetivo (reordena a tabela já calculada -- não recalcula a busca)",
+                    ["Maximizar RLT", "Minimizar risco (|MDD| / limiar)", "Maximizar lucro (com limite de MDD)"],
+                    key="portfolio_objetivo_otimizacao",
+                )
+                objetivo_map = {
+                    "Maximizar RLT": "maximizar_rlt",
+                    "Minimizar risco (|MDD| / limiar)": "minimizar_mdd_sobre_limiar",
+                    "Maximizar lucro (com limite de MDD)": "maximizar_lucro_com_limite_mdd",
+                }
+                objetivo_otimizacao = objetivo_map[objetivo_rotulo]
+
+                limite_mdd = None
+                if objetivo_otimizacao == "maximizar_lucro_com_limite_mdd":
+                    limite_mdd = st.number_input(
+                        "Limite de MDD (R$, negativo -- ex. -5000)", max_value=0.0, value=None,
+                        step=500.0, key="portfolio_limite_mdd",
+                        help="Só combinações já calculadas cujo MDD não seja pior que este valor "
+                             "entram na tabela -- obrigatório para este objetivo, nunca inventado.",
+                    )
+
+                pode_selecionar = objetivo_otimizacao != "maximizar_lucro_com_limite_mdd" or limite_mdd is not None
+                if not pode_selecionar:
+                    st.info("Informe o limite de MDD acima para ver a tabela ordenada.")
                 else:
-                    st.caption(
-                        f"{resultado_otimizacao['n_combinacoes_testadas']} combinações testadas -- "
-                        "quanto mais tentativas, maior o risco de a melhor combinação ser sorte de "
-                        "amostra, não edge real (o PDF-fonte pede para nunca reportar só o melhor "
-                        "resultado; por isso as top 10 aparecem, não só a primeira)."
-                    )
-                    tabela_otimizacao = pd.DataFrame([
-                        {
-                            **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
-                            "Lucro": fmt(r["lucro_total"], moeda=True),
-                            "MDD": fmt(r["mdd"], moeda=True),
-                            "ES95": fmt(r["es_95"], moeda=True),
-                            "Limiar": fmt(r["limiar_ativo"], moeda=True),
-                            "Score": fmt(r["score"], 4),
-                        }
-                        for r in resultado_otimizacao["melhores"]
-                    ])
-                    st.table(tabela_otimizacao)
-            elif not pode_rodar:
-                st.info("Informe o limite de MDD acima para habilitar a busca.")
+                    try:
+                        resultado_otimizacao = selecionar_melhores_combinacoes(
+                            resultados_busca, objetivo=objetivo_otimizacao, limite_mdd=limite_mdd,
+                        )
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    else:
+                        st.caption(
+                            f"{resultado_otimizacao['n_combinacoes_testadas']} de "
+                            f"{len(resultados_busca)} combinações calculadas satisfazem este "
+                            "objetivo -- quanto mais tentativas, maior o risco de a melhor "
+                            "combinação ser sorte de amostra, não edge real (o PDF-fonte pede para "
+                            "nunca reportar só o melhor resultado; por isso as top 10 aparecem)."
+                        )
+                        tabela_otimizacao = pd.DataFrame([
+                            {
+                                **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                                "Lucro": fmt(r["lucro_total"], moeda=True),
+                                "MDD": fmt(r["mdd"], moeda=True),
+                                "ES95": fmt(r["es_95"], moeda=True),
+                                "Limiar": fmt(r["limiar_ativo"], moeda=True),
+                                "Score": fmt(r["score"], 4),
+                            }
+                            for r in resultado_otimizacao["melhores"]
+                        ])
+                        st.table(tabela_otimizacao)
     else:
         st.info(
             "Informe a margem mínima de cada robô na barra lateral para calcular o limiar agregado, "
