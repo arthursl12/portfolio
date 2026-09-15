@@ -45,6 +45,7 @@ from tradefolio.portfolio import (
     limiar_agregado_portfolio,
     metricas_agregadas,
     otimizar_portfolio,
+    restringir_janela_comum,
     rlt_e_risco_portfolio,
     sincronizar_operou,
     sincronizar_portfolio,
@@ -364,13 +365,37 @@ def rodar_modo_portfolio():
         "detectada (diferente do modo Robô único -- aqui o diario já foi reescalado, ver docstring)."
     )
 
+    escopo_temporal = st.radio(
+        "Escopo temporal das métricas do portfólio",
+        ["Janela comum (todos ativos)", "Todos os dias (união)"],
+        key="portfolio_escopo_temporal",
+        captions=[
+            "Só o período em que TODOS os robôs já existiam -- evita misturar anos de um "
+            "robô sozinho com o período em que todos operavam juntos. Recomendado.",
+            "Do início do robô mais antigo ao fim do mais recente -- um robô que ainda não "
+            "existia conta como 0 nesses dias (não é excluído, só não contribui).",
+        ],
+        help="Padrão pedido pelo usuário: lucro/MDD/ES/correlação/limiar/RLT/contribuição "
+             "marginal/otimização usam a janela comum por padrão -- "
+             "ver tradefolio.portfolio.restringir_janela_comum.",
+    )
+    usar_janela_comum = escopo_temporal == "Janela comum (todos ativos)"
+
     largo = sincronizar_portfolio(diarios)
+    if usar_janela_comum:
+        try:
+            largo = restringir_janela_comum(largo)
+        except ValueError as erro:
+            st.error(str(erro))
+            st.stop()
     agregadas = metricas_agregadas(largo)
     correlacao = correlacao_portfolio(largo)
 
     st.caption(
-        f"{len(diarios)} robôs sincronizados: {', '.join(sorted(diarios))}. Datas em que um "
-        "robô ainda não existia contam como ausentes (NaN) na sincronização, não como zero -- "
+        f"{len(diarios)} robôs sincronizados: {', '.join(sorted(diarios))} -- "
+        f"{largo.index.min().strftime('%d/%m/%Y')} a {largo.index.max().strftime('%d/%m/%Y')} "
+        f"({len(largo)} pregões, escopo: {escopo_temporal.split(' (')[0].lower()}). Datas em que "
+        "um robô ainda não existia contam como ausentes (NaN) na sincronização, não como zero -- "
         "só dias em que o robô já existia mas não operou contam como zero (mesma convenção NO_TRADE "
         "usada dentro de cada robô)."
     )
@@ -389,6 +414,17 @@ def rodar_modo_portfolio():
                 "Dias de perda (combinado)", "Volatilidade alta (combinado)",
             ],
             key="portfolio_variante_correlacao",
+            captions=[
+                "Correlação sobre todo o escopo temporal escolhido acima -- pairwise complete "
+                "(cada par usa só as datas em que ambos têm dado).",
+                "Só datas em que TODOS os robôs de fato operaram (não apenas existiam) -- mais "
+                "restritivo que o escopo temporal acima.",
+                "Só os 20% piores dias da série COMBINADA do portfólio -- revela se a "
+                "correlação sobe justamente quando o portfólio vai mal.",
+                "Só dias em que a série COMBINADA teve resultado negativo.",
+                "Só os dias de maior volatilidade (desvio-padrão móvel) da série combinada -- "
+                "janela ajustável abaixo.",
+            ],
             help="lâmina ideal.pdf §13 pede pelo menos 4 variantes -- 'piores dias'/'perda'/"
                  "'volatilidade alta' usam a série COMBINADA do portfólio para definir "
                  "'dia ruim', não uma recombinação por par (ver docstring de tradefolio.portfolio).",
@@ -484,6 +520,7 @@ def rodar_modo_portfolio():
             contribuicoes = contribuicao_marginal(
                 diarios, minimum_margins, percentil_cauda=percentil_cauda,
                 fracao_reserva_operacional=fracao_reserva_operacional_pct / 100, increment=increment,
+                usar_janela_comum=usar_janela_comum,
             )
             tabela_contribuicao = pd.DataFrame({
                 nome: {
@@ -538,7 +575,7 @@ def rodar_modo_portfolio():
                         objetivo=objetivo_otimizacao, limite_mdd=limite_mdd,
                         percentil_cauda=percentil_cauda,
                         fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
-                        increment=increment,
+                        increment=increment, usar_janela_comum=usar_janela_comum,
                     )
                 except ValueError as erro:
                     st.error(str(erro))

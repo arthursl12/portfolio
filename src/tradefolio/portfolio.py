@@ -106,6 +106,30 @@ def metricas_agregadas(largo: pd.DataFrame) -> dict:
     }
 
 
+def restringir_janela_comum(largo: pd.DataFrame) -> pd.DataFrame:
+    """Restringe a série sincronizada ao intervalo em que TODOS os robôs
+    já existiam -- do início do robô mais recente até o fim do mais
+    antigo, se os históricos terminam em datas diferentes (pedido de
+    acompanhamento do usuário: métricas de portfólio devem, por padrão,
+    considerar só o período em que todos coexistiam, não a união inteira
+    -- caso contrário anos de um robô sozinho entram na mesma média que o
+    período em que todos já operavam juntos).
+
+    Diferente de `correlacao_dias_conjuntos`: aqui a janela é definida
+    por EXISTÊNCIA (não-NaN em `largo`), não por terem OPERADO naquele
+    dia -- um dia sem operação (0, já preenchido por
+    `alignment.preencher_calendario_b3` em cada diario) dentro da janela
+    comum continua incluído, só os dias antes/depois da coexistência são
+    cortados. `largo.dropna()` já produz exatamente esse intervalo
+    contíguo, porque `sincronizar_portfolio` só produz NaN antes do robô
+    existir ou depois de acabar -- nunca no meio (dias sem operação são
+    0, não NaN)."""
+    comum = largo.dropna()
+    if comum.empty:
+        raise ValueError("Os robôs não têm nenhum período em que todos coexistiram (janela comum vazia)")
+    return comum
+
+
 def correlacao_portfolio(largo: pd.DataFrame) -> pd.DataFrame:
     """Correlação de Pearson par-a-par entre os robôs do portfólio,
     variante "todos os dias" (tarefa 10.4, variante 1 -- lâmina ideal.pdf
@@ -256,6 +280,7 @@ def contribuicao_marginal(
     percentil_cauda: int = 95,
     fracao_reserva_operacional: float = 0.0,
     increment: float = None,
+    usar_janela_comum: bool = True,
 ) -> dict:
     """Tarefa 10.5 (lâmina ideal.pdf §13 "Valor marginal do robô"): para
     cada robô, recomputa lucro/MDD/ES95/limiar agregado COM e SEM aquele
@@ -265,6 +290,14 @@ def contribuicao_marginal(
     "sem ele"), caro para N grande mas barato para o número de robôs
     típico de um portfólio real (medir antes de otimizar, por isso
     nenhuma otimização foi feita aqui).
+
+    `usar_janela_comum=True` (padrão -- pedido de acompanhamento do
+    usuário): cada comparação ("com todos", "sem robô X") é restringida
+    à SUA PRÓPRIA janela comum via `restringir_janela_comum`, não à união
+    inteira nem à janela comum do portfólio completo -- "sem resgat", por
+    exemplo, usa o período em que os robôs RESTANTES coexistiam entre si,
+    que pode ser maior que a janela comum com resgat incluído. Passe
+    `False` para preservar o comportamento antigo (união com skipna).
 
     VLT deliberadamente NÃO incluído (mesma lacuna documentada em
     `rlt_e_risco_portfolio`/TASKS.md: precisaria de uma política de vapo
@@ -278,6 +311,8 @@ def contribuicao_marginal(
 
     def _metricas(subset_diarios: dict, subset_margens: dict) -> tuple[dict, float]:
         largo = sincronizar_portfolio(subset_diarios)
+        if usar_janela_comum:
+            largo = restringir_janela_comum(largo)
         agregadas = metricas_agregadas(largo)
         limiar = limiar_agregado_portfolio(
             largo, subset_margens, percentil_cauda, fracao_reserva_operacional, increment,
@@ -326,6 +361,7 @@ def otimizar_portfolio(
     fracao_reserva_operacional: float = 0.0,
     increment: float = None,
     top_n: int = 10,
+    usar_janela_comum: bool = True,
 ) -> dict:
     """Tarefa 10.8 -- busca discreta (NÃO otimização contínua, o PDF-fonte
     pede isso explicitamente) sobre combinações de número de contratos
@@ -371,6 +407,15 @@ def otimizar_portfolio(
     visível para quem consome (quanto mais combinações, maior a chance
     do "melhor" ser sorte de amostra, não edge real).
 
+    `usar_janela_comum=True` (padrão -- pedido de acompanhamento do
+    usuário): cada combinação testada é restringida à SUA PRÓPRIA janela
+    comum (`restringir_janela_comum`) antes de ser pontuada -- diferentes
+    combinações têm janelas comuns diferentes, já que excluir um robô
+    (candidato 0) muda quem precisa coexistir. Combinações cuja janela
+    comum ficaria vazia são puladas (mesmo tratamento de "sem
+    combinações válidas" já existente). Passe `False` para preservar o
+    comportamento antigo (união com skipna).
+
     Levanta `ValueError` se o total de combinações exceder
     `_LIMITE_COMBINACOES_OTIMIZACAO` (busca discreta não escala para
     muitas combinações -- reduza os candidatos por robô) ou se nenhuma
@@ -408,6 +453,11 @@ def otimizar_portfolio(
             continue
 
         largo = sincronizar_portfolio(diarios_ativos)
+        if usar_janela_comum:
+            try:
+                largo = restringir_janela_comum(largo)
+            except ValueError:
+                continue
         agregadas = metricas_agregadas(largo)
 
         if objetivo == "maximizar_lucro_com_limite_mdd":

@@ -56,6 +56,7 @@ from tradefolio.portfolio import (
     limiar_agregado_portfolio,
     metricas_agregadas,
     otimizar_portfolio,
+    restringir_janela_comum,
     rlt_e_risco_portfolio,
     serie_combinada,
     sincronizar_operou,
@@ -104,6 +105,33 @@ def test_serie_combinada_soma_com_skipna():
     assert combinada.sum() == pytest.approx(64320.93, abs=1e-2)
     # antes de gridhedge/romanos2 existirem, a combinada = só resgat
     assert combinada.loc["2024-06-03"] == pytest.approx(-385.0)
+
+
+# --- Janela comum (pedido de acompanhamento do usuário: métricas de
+# portfólio devem, por padrão, considerar só o período em que TODOS os
+# robôs já existiam -- não a união inteira, que mistura anos de resgat
+# sozinho com o período em que os 3 já coexistiam) -----------------------
+
+
+def test_restringir_janela_comum_corta_para_intersecao_de_existencia():
+    diarios = _diarios_reais()
+    largo = sincronizar_portfolio(diarios)
+    comum = restringir_janela_comum(largo)
+
+    assert comum.index.min() == pd.Timestamp("2025-06-11")
+    assert comum.index.max() == pd.Timestamp("2026-09-08")
+    assert len(comum) == 312
+    assert not comum.isna().any().any()
+
+
+def test_restringir_janela_comum_levanta_erro_se_vazia():
+    diarios = _diarios_reais()
+    # trunca resgat para terminar em 2024-12-31 -- bem antes de gridhedge
+    # começar (2025-06-02) -- não sobra nenhuma data em que ambos existam.
+    sem_overlap = diarios["resgat"].loc[:"2024-12-31"]
+    largo = sincronizar_portfolio({"resgat": sem_overlap, "gridhedge": diarios["gridhedge"]})
+    with pytest.raises(ValueError, match="[Cc]oexist"):
+        restringir_janela_comum(largo)
 
 
 def test_metricas_agregadas_real():
@@ -261,16 +289,22 @@ _PARAMS_10_5 = dict(percentil_cauda=95, fracao_reserva_operacional=0.10, increme
 
 
 def test_contribuicao_marginal_resgat():
+    # Default agora restringe cada comparação (com/sem robô) à sua PRÓPRIA
+    # janela comum (usar_janela_comum=True) -- pedido de acompanhamento do
+    # usuário: métricas de portfólio devem usar só o período em que todos
+    # os robôs envolvidos coexistiam, não a união. "sem resgat" usa a
+    # janela comum de {gridhedge, romanos2} (maior que a janela comum dos
+    # 3), não a janela comum original com resgat removido depois.
     diarios = _diarios_reais()
     contribuicoes = contribuicao_marginal(diarios, _MARGENS_10_5, **_PARAMS_10_5)
 
     resgat = contribuicoes["resgat"]
-    assert resgat["lucro_com"] == pytest.approx(64320.93, abs=1e-2)
-    assert resgat["lucro_sem"] == pytest.approx(29346.93, abs=1e-2)
-    assert resgat["diferenca_lucro"] == pytest.approx(34974.0, abs=1e-2)
+    assert resgat["lucro_com"] == pytest.approx(41619.93, abs=1e-2)
+    assert resgat["lucro_sem"] == pytest.approx(28657.93, abs=1e-2)
+    assert resgat["diferenca_lucro"] == pytest.approx(12962.0, abs=1e-2)
     assert resgat["diferenca_mdd"] == pytest.approx(-689.44, abs=1e-2)
-    assert resgat["diferenca_es95"] == pytest.approx(0.5025, abs=1e-2)
-    assert resgat["diferenca_limiar"] == pytest.approx(5000.0, abs=1e-6)
+    assert resgat["diferenca_es95"] == pytest.approx(-159.18437500000005, abs=1e-2)
+    assert resgat["diferenca_limiar"] == pytest.approx(5500.0, abs=1e-6)
 
 
 def test_contribuicao_marginal_gridhedge_e_romanos2():
@@ -278,16 +312,32 @@ def test_contribuicao_marginal_gridhedge_e_romanos2():
     contribuicoes = contribuicao_marginal(diarios, _MARGENS_10_5, **_PARAMS_10_5)
 
     gridhedge = contribuicoes["gridhedge"]
-    assert gridhedge["diferenca_lucro"] == pytest.approx(7559.43, abs=1e-2)
+    assert gridhedge["diferenca_lucro"] == pytest.approx(6870.43, abs=1e-2)
     assert gridhedge["diferenca_mdd"] == pytest.approx(-288.5, abs=1e-2)
-    assert gridhedge["diferenca_es95"] == pytest.approx(-136.089318, abs=1e-4)
+    assert gridhedge["diferenca_es95"] == pytest.approx(-198.96937500000013, abs=1e-2)
     assert gridhedge["diferenca_limiar"] == pytest.approx(6000.0, abs=1e-6)
 
     romanos2 = contribuicoes["romanos2"]
-    assert romanos2["diferenca_lucro"] == pytest.approx(21787.5, abs=1e-2)
-    assert romanos2["diferenca_mdd"] == pytest.approx(-318.5, abs=1e-2)
-    assert romanos2["diferenca_es95"] == pytest.approx(-139.485, abs=1e-3)
-    assert romanos2["diferenca_limiar"] == pytest.approx(5500.0, abs=1e-6)
+    assert romanos2["diferenca_lucro"] == pytest.approx(21825.5, abs=1e-2)
+    assert romanos2["diferenca_mdd"] == pytest.approx(-778.0, abs=1e-2)
+    assert romanos2["diferenca_es95"] == pytest.approx(-171.2525, abs=1e-2)
+    assert romanos2["diferenca_limiar"] == pytest.approx(6000.0, abs=1e-6)
+
+
+def test_contribuicao_marginal_uniao_explicita_preserva_comportamento_antigo():
+    # usar_janela_comum=False -- opt-out explícito, mesmo comportamento
+    # (união com skipna) e mesmos valores já verificados antes desta
+    # mudança de default.
+    diarios = _diarios_reais()
+    contribuicoes = contribuicao_marginal(
+        diarios, _MARGENS_10_5, usar_janela_comum=False, **_PARAMS_10_5,
+    )
+
+    resgat = contribuicoes["resgat"]
+    assert resgat["lucro_com"] == pytest.approx(64320.93, abs=1e-2)
+    assert resgat["lucro_sem"] == pytest.approx(29346.93, abs=1e-2)
+    assert resgat["diferenca_lucro"] == pytest.approx(34974.0, abs=1e-2)
+    assert resgat["diferenca_limiar"] == pytest.approx(5000.0, abs=1e-6)
 
 
 def test_contribuicao_marginal_exige_ao_menos_2_robos():
@@ -315,20 +365,20 @@ _PARAMS_10_8 = dict(percentil_cauda=95, fracao_reserva_operacional=0.10, increme
 
 
 def test_otimizar_portfolio_maximizar_rlt_pode_excluir_robo():
+    # Default agora restringe CADA candidato à sua própria janela comum
+    # (usar_janela_comum=True) -- ver docstring de restringir_janela_comum.
     diarios = _diarios_reais()
     resultado = otimizar_portfolio(
         diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
         objetivo="maximizar_rlt", **_PARAMS_10_8,
     )
-    # 3*2*2=12 combinações totais, menos a combinação "todos em 0" (não é
-    # um portfólio válido, pulada) = 11.
     assert resultado["n_combinacoes_testadas"] == 11
     melhor = resultado["melhores"][0]
-    # o melhor RLT exclui gridhedge inteiramente (conferido por script) --
-    # demonstração real de que excluir um robô pode ser ótimo.
-    assert melhor["alocacao"] == {"resgat": 6, "gridhedge": 0, "romanos2": 2}
-    assert melhor["score"] == pytest.approx(3.7841, abs=1e-3)
-    assert melhor["lucro_total"] == pytest.approx(56761.5, abs=1e-2)
+    # o melhor RLT agora exclui DOIS dos três robôs (só resgat) --
+    # demonstração ainda mais direta de que excluir robôs pode vencer.
+    assert melhor["alocacao"] == {"resgat": 6, "gridhedge": 0, "romanos2": 0}
+    assert melhor["score"] == pytest.approx(3.330857142857143, abs=1e-6)
+    assert melhor["lucro_total"] == pytest.approx(34974.0, abs=1e-2)
 
 
 def test_otimizar_portfolio_minimizar_mdd_sobre_limiar():
@@ -339,7 +389,7 @@ def test_otimizar_portfolio_minimizar_mdd_sobre_limiar():
     )
     melhor = resultado["melhores"][0]
     assert melhor["alocacao"] == {"resgat": 3, "gridhedge": 1, "romanos2": 2}
-    assert melhor["score"] == pytest.approx(-0.19884848484848486, abs=1e-6)
+    assert melhor["score"] == pytest.approx(-0.193, abs=1e-6)
 
 
 def test_otimizar_portfolio_maximizar_lucro_com_limite_mdd():
@@ -350,8 +400,22 @@ def test_otimizar_portfolio_maximizar_lucro_com_limite_mdd():
     )
     melhor = resultado["melhores"][0]
     assert melhor["alocacao"] == {"resgat": 3, "gridhedge": 0, "romanos2": 2}
-    assert melhor["lucro_total"] == pytest.approx(39274.5, abs=1e-2)
+    assert melhor["lucro_total"] == pytest.approx(28268.5, abs=1e-2)
     assert melhor["mdd"] >= -3000.0
+
+
+def test_otimizar_portfolio_uniao_explicita_preserva_comportamento_antigo():
+    # usar_janela_comum=False -- opt-out explícito, mesmos valores já
+    # verificados antes desta mudança de default.
+    diarios = _diarios_reais()
+    resultado = otimizar_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        objetivo="maximizar_rlt", usar_janela_comum=False, **_PARAMS_10_8,
+    )
+    melhor = resultado["melhores"][0]
+    assert melhor["alocacao"] == {"resgat": 6, "gridhedge": 0, "romanos2": 2}
+    assert melhor["score"] == pytest.approx(3.7841, abs=1e-3)
+    assert melhor["lucro_total"] == pytest.approx(56761.5, abs=1e-2)
 
 
 def test_otimizar_portfolio_maximizar_lucro_exige_limite_mdd():

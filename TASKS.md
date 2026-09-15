@@ -625,6 +625,43 @@ vez). `VERSOES["portfolio"]` = `"portfolio_v1"`.
   inferir MISSING_DATA nesta rodada (ficaria indistinguível de "ainda
   não existia" por enquanto).
 
+### Escopo temporal padrão (pedido de acompanhamento do usuário, fora dos épicos do PDF-fonte)
+- [x] `portfolio.restringir_janela_comum(largo)` -- corta `largo` para o
+  intervalo em que TODOS os robôs já existiam (`largo.dropna()`, que já
+  produz exatamente esse intervalo contíguo porque `sincronizar_portfolio`
+  só gera NaN antes/depois da existência de um robô, nunca no meio --
+  dias sem operação são 0). Levanta `ValueError` se não houver nenhum
+  período de coexistência.
+- [x] `contribuicao_marginal`/`otimizar_portfolio` ganharam
+  `usar_janela_comum: bool = True` -- agora restringem CADA comparação/
+  candidato à SUA PRÓPRIA janela comum (não à janela comum do portfólio
+  completo) antes de pontuar. Isso muda o DEFAULT numérico dessas duas
+  funções -- por isso `VERSOES["portfolio"]` foi de `_v1` para `_v2`
+  (ver `versions.py`). União ainda disponível via `usar_janela_comum=False`,
+  testada explicitamente (`test_contribuicao_marginal_uniao_explicita_
+  preserva_comportamento_antigo`, `test_otimizar_portfolio_uniao_
+  explicita_preserva_comportamento_antigo`).
+- [x] Wireado como o padrão em ambas as UIs: `app.py` ganhou um radio
+  "Escopo temporal das métricas do portfólio" no topo da seção (com
+  `captions=` por opção, já que `st.radio`/`st.segmented_control` só
+  suportam um `help=` único para o grupo inteiro, não por item --
+  `captions` foi a forma nativa mais próxima de "hover por opção"
+  disponível no Streamlit 1.63); `report.py` ganhou `--escopo-temporal
+  {janela_comum,todos_os_dias}` (padrão `janela_comum`). Ambos afetam
+  lucro/MDD/ES/correlação (todas as 6 variantes, herdado automaticamente
+  já que todas operam sobre o `largo` já restringido)/limiar/RLT/
+  contribuição marginal/otimização.
+- [x] `captions=` também adicionado ao seletor de 5 variantes de
+  correlação já existente (pedido explícito do usuário: "add hover
+  information on these options").
+- [x] Verificado contra dados reais (resgat+gridhedge+romanos2): janela
+  comum = 11/06/2025 a 08/09/2026 (312 pregões) vs. união = 13/03/2024 a
+  08/09/2026 (623 pregões); lucro combinado cai de R$64.320,93 (união)
+  para R$41.619,93 (janela comum) -- a diferença é inteiramente o
+  período em que resgat operava sozinho, antes dos outros dois
+  existirem. Números idênticos entre `app.py` (via `AppTest`) e
+  `report.py` (execução real do CLI).
+
 ### Tarefa 10.2 — Suportar quantidades e multiplicadores
 - [x] `PortfolioAllocation(strategy_id, multiplier, active_from)` em
   `domain.py` -- dataclass irmão de `StrategyConfiguration`.

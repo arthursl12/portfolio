@@ -36,6 +36,7 @@ from tradefolio.portfolio import (
     correlacao_volatilidade_alta,
     limiar_agregado_portfolio,
     metricas_agregadas,
+    restringir_janela_comum,
     rlt_e_risco_portfolio,
     sincronizar_operou,
     sincronizar_portfolio,
@@ -588,6 +589,7 @@ def gerar_secao_portfolio(
     resumo_robos: dict, agregadas: dict, correlacoes: dict, correlacao_movel_df,
     janela_movel: int, limiar_agregado: dict | None, soma_individuais: float | None,
     beneficio: dict | None, rlt: dict | None, contribuicoes: dict | None, nomes_robos: list,
+    periodo_label: str = "",
 ) -> str:
     """Portfólio agregado (AGENTS.md épico 10) -- composição (contratos e
     margem por robô), métricas combinadas, 5 variantes de correlação +
@@ -702,7 +704,7 @@ def gerar_secao_portfolio(
 
     return f"""
     <h2>Portfólio — {len(nomes_robos)} robôs sincronizados</h2>
-    <p class="nota">Robôs: {', '.join(nomes_robos)}. Datas em que um robô ainda não existia contam como ausentes (NaN) na sincronização, não como zero -- só dias em que o robô já existia mas não operou contam como zero.</p>
+    <p class="nota">Robôs: {', '.join(nomes_robos)}{periodo_label}. Datas em que um robô ainda não existia contam como ausentes (NaN) na sincronização, não como zero -- só dias em que o robô já existia mas não operou contam como zero.</p>
     {secao_composicao}
     <table>
       <tr><td class="rotulo">Lucro total (combinado)</td><td class="valor">{fmt(agregadas['lucro_total'], moeda=True)}</td></tr>
@@ -826,6 +828,13 @@ def _parse_argumentos():
         "--janela-movel-correlacao", type=int, default=63,
         help="Janela (pregões) da correlação móvel entre robôs (tarefa 10.4) -- "
              "63 pregões (~3 meses) por padrão, nem o PDF-fonte especifica um valor.",
+    )
+    p_port.add_argument(
+        "--escopo-temporal", choices=("janela_comum", "todos_os_dias"), default="janela_comum",
+        help="'janela_comum' (padrão): lucro/MDD/ES/correlação/limiar/RLT/contribuição marginal "
+             "usam só o período em que TODOS os robôs já existiam -- evita misturar anos de um "
+             "robô sozinho com o período em que todos operavam juntos. 'todos_os_dias': união "
+             "inteira (comportamento anterior), um robô que ainda não existia conta como 0.",
     )
     p_port.add_argument(
         "--dias-recentes-deteccao", type=int, default=90,
@@ -981,7 +990,10 @@ def _rodar_modo_portfolio(args):
     if len(diarios) < 2:
         raise SystemExit("Modo portfolio exige ao menos 2 robôs (--robo repetido 2+ vezes).")
 
+    usar_janela_comum = args.escopo_temporal == "janela_comum"
     largo = sincronizar_portfolio(diarios)
+    if usar_janela_comum:
+        largo = restringir_janela_comum(largo)
     operou = sincronizar_operou(diarios)
     agregadas = metricas_agregadas(largo)
     correlacoes = {
@@ -1004,11 +1016,17 @@ def _rodar_modo_portfolio(args):
     contribuicoes = contribuicao_marginal(
         diarios, minimum_margins, percentil_cauda=args.percentil_cauda,
         fracao_reserva_operacional=args.fracao_reserva_operacional, increment=args.increment,
+        usar_janela_comum=usar_janela_comum,
     )
 
+    periodo_label = (
+        f" -- {largo.index.min().strftime('%d/%m/%Y')} a {largo.index.max().strftime('%d/%m/%Y')} "
+        f"({len(largo)} pregões, escopo: {args.escopo_temporal.replace('_', ' ')})"
+    )
     secao_portfolio = gerar_secao_portfolio(
         resumo_robos, agregadas, correlacoes, correlacao_movel_df, args.janela_movel_correlacao,
         limiar_agregado, soma_individuais, beneficio, rlt, contribuicoes, sorted(diarios),
+        periodo_label,
     )
     html_portfolio = gerar_html_portfolio(secao_portfolio)
 
