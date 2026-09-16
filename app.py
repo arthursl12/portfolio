@@ -13,6 +13,7 @@ não têm esse problema -- cada dia é agregado independentemente.
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from report import fmt, montar_figura_curva_drawdown, montar_figura_distribuicao
@@ -722,7 +723,16 @@ def rodar_modo_portfolio():
                     }
                     for r in resultados_busca
                 ])
-                st.scatter_chart(grafico_pareto, x=rotulo_risco, y=rotulo_retorno, color="Na fronteira")
+                # st.scatter_chart (Altair/Vega-Lite, SVG) renders one DOM node
+                # per ponto -- com milhares de combinações isso travava o scroll
+                # da página (pedido de acompanhamento do usuário). plotly com
+                # render_mode="webgl" desenha em canvas/GPU em vez de SVG, sem
+                # precisar reduzir os pontos mostrados.
+                fig_pareto = px.scatter(
+                    grafico_pareto, x=rotulo_risco, y=rotulo_retorno,
+                    color="Na fronteira", render_mode="webgl",
+                )
+                st.plotly_chart(fig_pareto, width="stretch")
 
                 tabela_pareto = pd.DataFrame([
                     {

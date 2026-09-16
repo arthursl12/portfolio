@@ -3,3 +3,4 @@ numpy
 matplotlib
 pandas_market_calendars
 streamlit
+plotly
