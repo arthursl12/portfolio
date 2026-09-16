@@ -47,6 +47,7 @@ import pytest
 from tradefolio.portfolio import (
     beneficio_diversificacao,
     contribuicao_marginal,
+    contribuicao_risco_por_robo,
     correlacao_dias_conjuntos,
     correlacao_movel,
     correlacao_perdas,
@@ -348,6 +349,115 @@ def test_contribuicao_marginal_exige_ao_menos_2_robos():
     diarios = {"resgat": _diarios_reais()["resgat"]}
     with pytest.raises(ValueError, match="2"):
         contribuicao_marginal(diarios, {"resgat": 5000.0})
+
+
+# --- Contribuição de risco por robô (backlog de prompts/otimizacao.pdf,
+# fora dos épicos do PDF-fonte) -------------------------------------------
+#
+# Distinto de contribuicao_marginal (COM vs. SEM o robô): aqui é uma
+# decomposição DENTRO da carteira já escolhida -- "quem causou o quê" em
+# três lentes mantidas SEPARADAS (o documento é explícito: "não some
+# imediatamente os três em uma nota arbitrária"):
+#   (1) contribuição à volatilidade via covariância (alocação de Euler:
+#       Cov(robô, portfólio)/vol(portfólio) -- soma exatamente à
+#       volatilidade total). Decisão confirmada com o usuário: reabre a
+#       convenção de variância/covariância que a docstring de
+#       fronteira_pareto rejeitou para ESCOLHER contratos discretos
+#       (Markowitz não serve para a busca em si) -- aqui é só uma
+#       decomposição analítica de uma carteira já fixada, não influencia
+#       nenhuma busca nem reintroduz variância como critério de
+#       otimização.
+#   (2) contribuição ao Expected Shortfall -- média do resultado de cada
+#       robô nos MESMOS dias que definem o ES95/ES99 do portfólio
+#       (mesmo corte de `metrics.var_historico` usado por
+#       `metrics.expected_shortfall`).
+#   (3) contribuição ao drawdown -- decisão confirmada com o usuário: usa
+#       APENAS o pior episódio histórico (o mesmo que já define o MDD em
+#       `metricas_agregadas`), não uma média entre todos os episódios --
+#       garante que as participações somem exatamente ao MDD já mostrado
+#       em outros lugares, e evita inventar um esquema de ponderação
+#       entre episódios de profundidade diferente. Inclui também
+#       "frequência de liderar a perda": em quantos dias daquele episódio
+#       (pico->fundo) aquele robô teve o pior resultado do dia entre os
+#       robôs do portfólio.
+# As três lentes somam exatamente 100% cada (e as frequências somam 1.0)
+# -- confirma que nenhuma decomposição está vazando nem contando duas
+# vezes. Valores conferidos por script antes destes testes.
+
+_PARAMS_RISCO = dict(percentil_cauda=95)
+
+
+def test_contribuicao_risco_por_robo_volatilidade():
+    diarios = _diarios_reais()
+    resultado = contribuicao_risco_por_robo(diarios, **_PARAMS_RISCO)
+
+    assert resultado["volatilidade_portfolio"] == pytest.approx(682.2704779220393, abs=1e-6)
+    por_robo = resultado["por_robo"]
+    assert por_robo["resgat"]["contribuicao_volatilidade"] == pytest.approx(197.82151492430916, abs=1e-4)
+    assert por_robo["resgat"]["participacao_volatilidade_pct"] == pytest.approx(28.99458811801521, abs=1e-4)
+    assert por_robo["gridhedge"]["participacao_volatilidade_pct"] == pytest.approx(17.496510660392612, abs=1e-4)
+    assert por_robo["romanos2"]["participacao_volatilidade_pct"] == pytest.approx(53.5089012215922, abs=1e-4)
+    soma = sum(v["participacao_volatilidade_pct"] for v in por_robo.values())
+    assert soma == pytest.approx(100.0, abs=1e-6)
+
+
+def test_contribuicao_risco_por_robo_expected_shortfall():
+    diarios = _diarios_reais()
+    resultado = contribuicao_risco_por_robo(diarios, **_PARAMS_RISCO)
+
+    assert resultado["es_referencia"] == pytest.approx(-1136.5943750000001, abs=1e-2)
+    assert resultado["n_dias_cauda_es"] == 16
+    por_robo = resultado["por_robo"]
+    assert por_robo["resgat"]["contribuicao_es"] == pytest.approx(-427.125, abs=1e-2)
+    assert por_robo["resgat"]["participacao_es_pct"] == pytest.approx(37.57936950902119, abs=1e-4)
+    assert por_robo["gridhedge"]["participacao_es_pct"] == pytest.approx(35.33862949128179, abs=1e-4)
+    assert por_robo["romanos2"]["participacao_es_pct"] == pytest.approx(27.08200099969701, abs=1e-4)
+    soma = sum(v["participacao_es_pct"] for v in por_robo.values())
+    assert soma == pytest.approx(100.0, abs=1e-6)
+
+
+def test_contribuicao_risco_por_robo_drawdown():
+    diarios = _diarios_reais()
+    resultado = contribuicao_risco_por_robo(diarios, **_PARAMS_RISCO)
+
+    episodio = resultado["episodio_drawdown_referencia"]
+    assert episodio["inicio_pico"] == pd.Timestamp("2025-07-09")
+    assert episodio["data_fundo"] == pd.Timestamp("2025-07-24")
+    assert episodio["profundidade_rs"] == pytest.approx(-4452.5, abs=1e-2)
+    # mesmo episódio que já define o MDD agregado (decisão confirmada com
+    # o usuário -- ver comentário acima deste bloco de testes).
+    largo = restringir_janela_comum(sincronizar_portfolio(diarios))
+    assert episodio["profundidade_rs"] == pytest.approx(metricas_agregadas(largo)["mdd"], abs=1e-6)
+
+    por_robo = resultado["por_robo"]
+    assert por_robo["resgat"]["contribuicao_drawdown"] == pytest.approx(-3386.0, abs=1e-2)
+    assert por_robo["resgat"]["participacao_drawdown_pct"] == pytest.approx(76.0471645143178, abs=1e-4)
+    assert por_robo["resgat"]["frequencia_lidera_perda_drawdown"] == pytest.approx(0.45454545454545453, abs=1e-6)
+    assert por_robo["gridhedge"]["participacao_drawdown_pct"] == pytest.approx(6.47950589556429, abs=1e-4)
+    assert por_robo["romanos2"]["participacao_drawdown_pct"] == pytest.approx(17.47332959011791, abs=1e-4)
+    soma_pct = sum(v["participacao_drawdown_pct"] for v in por_robo.values())
+    assert soma_pct == pytest.approx(100.0, abs=1e-6)
+    soma_freq = sum(v["frequencia_lidera_perda_drawdown"] for v in por_robo.values())
+    assert soma_freq == pytest.approx(1.0, abs=1e-6)
+
+
+def test_contribuicao_risco_por_robo_exige_ao_menos_2_robos():
+    diarios = {"resgat": _diarios_reais()["resgat"]}
+    with pytest.raises(ValueError, match="2"):
+        contribuicao_risco_por_robo(diarios)
+
+
+def test_contribuicao_risco_por_robo_uniao_explicita_nao_deixa_nan_vazar():
+    # usar_janela_comum=False -- mesma convenção de robustez_portfolio:
+    # NaN (robô ainda não existia) vira 0 antes de covariância/ES/
+    # drawdown, não silenciosamente propaga NaN pro resultado.
+    diarios = _diarios_reais()
+    largo_uniao = sincronizar_portfolio(diarios)
+    assert largo_uniao.isna().any().any()  # confirma que há NaN de fato
+
+    resultado = contribuicao_risco_por_robo(diarios, usar_janela_comum=False, **_PARAMS_RISCO)
+    for v in resultado["por_robo"].values():
+        assert all(x == x for x in v.values())  # nenhum NaN (x != x só é True para NaN)
 
 
 # --- Tarefa 10.8: otimização de portfólio (busca discreta) --------------

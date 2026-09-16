@@ -44,6 +44,7 @@ from tradefolio.portfolio import (
     beneficio_diversificacao,
     buscar_combinacoes_portfolio,
     contribuicao_marginal,
+    contribuicao_risco_por_robo,
     correlacao_dias_conjuntos,
     correlacao_movel,
     correlacao_perdas,
@@ -583,6 +584,61 @@ def rodar_modo_portfolio():
                 for nome, c in contribuicoes.items()
             }).T
             st.table(tabela_contribuicao)
+
+        with st.expander("Contribuição de risco por robô (dentro da carteira atual)"):
+            st.caption(
+                "Backlog de prompts/otimizacao.pdf -- distinto da contribuição marginal acima "
+                "(COM vs. SEM o robô): aqui é uma decomposição de QUEM CAUSOU O QUÊ dentro da "
+                "carteira já montada, em três lentes mantidas SEPARADAS (o documento é explícito: "
+                "\"não some os três em uma nota arbitrária\"). Cada tabela soma exatamente 100% "
+                "entre os robôs -- é o que confirma que nenhuma decomposição está vazando."
+            )
+            contribuicoes_risco = contribuicao_risco_por_robo(
+                diarios, percentil_cauda=percentil_cauda, usar_janela_comum=usar_janela_comum,
+            )
+            por_robo_risco = contribuicoes_risco["por_robo"]
+
+            st.markdown(
+                "**Volatilidade (covariância -- alocação de Euler).** Reabre, só para esta "
+                "decomposição analítica, a convenção de variância que a Fronteira de Pareto "
+                "(acima) rejeita para ESCOLHER contratos -- decisão discutida com o usuário."
+            )
+            st.table(pd.DataFrame({
+                nome: {
+                    "Contribuição (R$)": fmt(c["contribuicao_volatilidade"], moeda=True),
+                    "Participação": fmt(c["participacao_volatilidade_pct"]) + "%",
+                }
+                for nome, c in por_robo_risco.items()
+            }).T)
+
+            st.markdown(
+                f"**Expected Shortfall (ES{percentil_cauda}).** Resultado médio de cada robô nos "
+                f"{contribuicoes_risco['n_dias_cauda_es']} dias que definem o ES{percentil_cauda} "
+                f"do portfólio ({fmt(contribuicoes_risco['es_referencia'], moeda=True)})."
+            )
+            st.table(pd.DataFrame({
+                nome: {
+                    "Contribuição (R$)": fmt(c["contribuicao_es"], moeda=True),
+                    "Participação": fmt(c["participacao_es_pct"]) + "%",
+                }
+                for nome, c in por_robo_risco.items()
+            }).T)
+
+            episodio = contribuicoes_risco["episodio_drawdown_referencia"]
+            st.markdown(
+                "**Drawdown (pior episódio histórico -- o mesmo que define o MDD acima).** "
+                f"{episodio['inicio_pico'].date()} a {episodio['data_fundo'].date()} "
+                f"({fmt(episodio['profundidade_rs'], moeda=True)}). \"Lidera a perda\" = fração "
+                "dos dias do episódio em que o robô teve o pior resultado do dia."
+            )
+            st.table(pd.DataFrame({
+                nome: {
+                    "Contribuição (R$)": fmt(c["contribuicao_drawdown"], moeda=True),
+                    "Participação": fmt(c["participacao_drawdown_pct"]) + "%",
+                    "Lidera a perda": fmt(c["frequencia_lidera_perda_drawdown"] * 100) + "%",
+                }
+                for nome, c in por_robo_risco.items()
+            }).T)
 
         with st.expander("Otimização de portfólio (busca discreta)"):
             st.caption(

@@ -56,7 +56,13 @@ import pandas as pd
 
 from tradefolio import limiar as limiar_mod
 from tradefolio import metrics
-from tradefolio.drawdowns import curva_equity, drawdown, maximo_drawdown, time_under_water_max
+from tradefolio.drawdowns import (
+    calcular_episodios_drawdown,
+    curva_equity,
+    drawdown,
+    maximo_drawdown,
+    time_under_water_max,
+)
 from tradefolio.monte_carlo import circular_block_bootstrap, resumo_trajetorias
 
 
@@ -396,6 +402,131 @@ def contribuicao_marginal(
             "diferenca_limiar": limiar_completo - limiar_sem,
         }
     return resultado
+
+
+def contribuicao_risco_por_robo(
+    diarios: dict,
+    percentil_cauda: int = 95,
+    usar_janela_comum: bool = True,
+) -> dict:
+    """Backlog de `prompts/otimizacao.pdf` (fora dos épicos do PDF-fonte):
+    decomposição de risco DENTRO de uma carteira já escolhida -- "quem
+    causou o quê" -- distinta de `contribuicao_marginal` (que compara COM
+    vs. SEM o robô, N+1 recomputações completas). Aqui não há
+    recomputação: é uma decomposição ANALÍTICA de uma única carteira já
+    fixada, em três lentes mantidas SEPARADAS (o documento-fonte é
+    explícito: "não some imediatamente os três em uma nota arbitrária"):
+
+    1. `contribuicao_volatilidade`/`participacao_volatilidade_pct` --
+       alocação de Euler: `Cov(robô, portfólio) / vol(portfólio)`, que
+       soma exatamente à `volatilidade_portfolio` (identidade de Euler
+       para uma função homogênea de grau 1 como o desvio padrão de uma
+       soma linear). Decisão CONFIRMADA com o usuário: isto reabre a
+       convenção de variância/covariância que a docstring de
+       `fronteira_pareto` rejeitou -- mas só para ESCOLHER contratos
+       discretos (Markowitz não serve para a busca em si, que continua
+       usando MDD/ES/limiar). Aqui é só uma decomposição analítica de uma
+       carteira já fixada -- não influencia nenhuma busca, não
+       reintroduz variância como critério de otimização.
+    2. `contribuicao_es`/`participacao_es_pct` -- média do resultado de
+       cada robô nos MESMOS dias que definem o `es_referencia`
+       (`ES{percentil_cauda}`) do portfólio (mesmo corte de
+       `metrics.var_historico` usado por `metrics.expected_shortfall`).
+       Soma exatamente a `es_referencia`.
+    3. `contribuicao_drawdown`/`participacao_drawdown_pct`/
+       `frequencia_lidera_perda_drawdown` -- decisão CONFIRMADA com o
+       usuário: usa APENAS o PIOR episódio histórico de drawdown do
+       portfólio (`episodio_drawdown_referencia`, o mesmo que já define
+       o MDD reportado por `metricas_agregadas`), não uma média entre
+       todos os episódios -- garante que as participações somem
+       exatamente ao MDD já mostrado em outros lugares da UI, e evita
+       inventar um esquema de ponderação entre episódios de profundidade
+       diferente (mais episódios/ponderação é backlog, não decidido).
+       A janela do episódio é do primeiro dia submerso (dia seguinte ao
+       pico) até o dia do fundo, INCLUSIVE -- não até a recuperação --
+       porque é exatamente essa janela cuja soma bate com
+       `profundidade_rs` (`equity_fundo - equity_pico`).
+       `frequencia_lidera_perda_drawdown`: fração dos dias dessa janela
+       em que aquele robô teve o PIOR resultado do dia entre os robôs do
+       portfólio (empate: `DataFrame.idxmin` resolve pela ordem das
+       colunas, primeira ocorrência -- resultado determinístico, não
+       "crédito compartilhado"). Soma 1.0 entre os robôs.
+
+    `usar_janela_comum=True` (padrão, mesmo espírito de
+    `contribuicao_marginal`/`buscar_combinacoes_portfolio`): restringe
+    `largo` à janela em que todos os robôs coexistiam antes de qualquer
+    cálculo. Com `False` (união), `largo.fillna(0.0)` evita que NaN (robô
+    ainda não existia) vaze para covariância/ES/drawdown -- mesma
+    convenção de `robustez_portfolio` (um robô inexistente contribui 0,
+    nunca NaN).
+
+    Exige 2+ robôs -- "contribuição de risco" de um portfólio de 1 robô
+    não é um conceito coerente (não há o que decompor)."""
+    if len(diarios) < 2:
+        raise ValueError("contribuicao_risco_por_robo exige ao menos 2 robôs no portfólio")
+
+    nomes = list(diarios.keys())
+    largo = sincronizar_portfolio(diarios)
+    if usar_janela_comum:
+        largo = restringir_janela_comum(largo)
+    largo = largo.fillna(0.0)
+    combinada = serie_combinada(largo)
+
+    por_robo = {nome: {} for nome in nomes}
+
+    # 1. Volatilidade (alocação de Euler via covariância).
+    volatilidade_portfolio = combinada.std()
+    for nome in nomes:
+        contrib = largo[nome].cov(combinada) / volatilidade_portfolio
+        por_robo[nome]["contribuicao_volatilidade"] = contrib
+        por_robo[nome]["participacao_volatilidade_pct"] = contrib / volatilidade_portfolio * 100
+
+    # 2. Expected Shortfall.
+    confianca = percentil_cauda / 100
+    limite_es = metrics.var_historico(combinada, confianca)
+    dias_cauda = combinada[combinada <= limite_es].index
+    es_referencia = metrics.expected_shortfall(combinada, confianca)
+    for nome in nomes:
+        contrib = largo.loc[dias_cauda, nome].mean()
+        por_robo[nome]["contribuicao_es"] = contrib
+        por_robo[nome]["participacao_es_pct"] = contrib / es_referencia * 100
+
+    # 3. Drawdown -- pior episódio histórico (mesmo que define o MDD).
+    equity = curva_equity(combinada)
+    episodios = calcular_episodios_drawdown(equity)
+    if episodios.empty:
+        raise ValueError(
+            "Nenhum episódio de drawdown encontrado na série combinada -- "
+            "portfólio nunca ficou abaixo do pico anterior"
+        )
+    pior = episodios.loc[episodios["profundidade_rs"].idxmin()]
+    pos_pico = equity.index.get_loc(pior["inicio_pico"])
+    primeiro_dia_submerso = equity.index[pos_pico + 1]
+    janela_episodio = largo.loc[primeiro_dia_submerso:pior["data_fundo"]]
+    lideres_do_dia = janela_episodio.idxmin(axis=1)
+    contagem_lideres = lideres_do_dia.value_counts()
+    for nome in nomes:
+        contrib = janela_episodio[nome].sum()
+        por_robo[nome]["contribuicao_drawdown"] = contrib
+        por_robo[nome]["participacao_drawdown_pct"] = contrib / pior["profundidade_rs"] * 100
+        por_robo[nome]["frequencia_lidera_perda_drawdown"] = (
+            contagem_lideres.get(nome, 0) / len(janela_episodio)
+        )
+
+    return {
+        "por_robo": por_robo,
+        "volatilidade_portfolio": volatilidade_portfolio,
+        "es_referencia": es_referencia,
+        "percentil_cauda": percentil_cauda,
+        "n_dias_cauda_es": len(dias_cauda),
+        "episodio_drawdown_referencia": {
+            "inicio_pico": pior["inicio_pico"],
+            "data_fundo": pior["data_fundo"],
+            "data_recuperacao": pior["data_recuperacao"],
+            "profundidade_rs": pior["profundidade_rs"],
+            "pregoes_ate_fundo": pior["pregoes_ate_fundo"],
+        },
+    }
 
 
 _OBJETIVOS_OTIMIZACAO = (

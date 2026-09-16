@@ -1352,3 +1352,244 @@ ordem/trade/contrato). Implementado em `src/tradefolio/daily_results.py`.
   números idênticos); combinado com `orders_resgat.csv` na janela comum
   (Épico 10): lucro R$14.472,00, MDD R$-2.512,00 -- conferido por script
   independente e idêntico entre `app.py`/`report.py`.
+
+---
+
+## Otimização de portfólio — backlog de `prompts/otimizacao.pdf` (fora dos épicos do PDF-fonte, evolução da tarefa 10.8)
+
+Documento externo trazido pelo usuário depois de reportar que a Fronteira
+de Pareto (tarefa 10.8) travava o SCROLL da página com muitas combinações
+-- causa raiz era renderização (`st.scatter_chart`/Altair-SVG desenhando
+um nó de DOM por ponto), já corrigida trocando para `st.plotly_chart`
+com `render_mode="webgl"` em `app.py`. O documento em si não é sobre essa
+lentidão -- é uma proposta de produto mais ampla para como decidir QUANTOS
+contratos por robô, contrastando com a busca por força bruta atual
+(`buscar_combinacoes_portfolio` testa cada combinação da grade candidata
+inteira, sem filtro/funil prévio). Nada aqui está decidido ou priorizado
+-- é a lista de ideias capturada para não se perder, para ser discutida
+tarefa a tarefa antes de qualquer implementação (AGENTS.md §24: parar e
+perguntar em vez de adivinhar convenção/prioridade).
+
+### Já implementado -- não duplicar
+O documento propõe várias coisas que a base de código já faz, sob outro
+nome ou já cobertas pela tarefa 10.4/10.8:
+- Matriz diária por robô, alinhada por data, ausência ≠ zero:
+  `sincronizar_portfolio` (Tarefa 10.1) já faz exatamente isso via `pd.DataFrame`
+  com NaN para "ainda não existia".
+- Correlação geral, correlação nos dias negativos (20% piores dias),
+  correlação nos piores dias/perdas, correlação em alta volatilidade,
+  correlação móvel: `correlacao_portfolio`, `correlacao_piores_dias`
+  (mesmo corte de 20% do documento), `correlacao_perdas`,
+  `correlacao_volatilidade_alta`, `correlacao_movel` (Tarefa 10.4, 6
+  variantes já existentes).
+- Geração de combinações inteiras com `0` como candidato válido
+  (equivalente a "excluir o robô"): `buscar_combinacoes_portfolio`.
+- Fronteira de Pareto discreta sobre as combinações já calculadas:
+  `fronteira_pareto` (dedupe de EMPATES exatos já feito -- falta a
+  tolerância econômica/epsilon do documento, ver abaixo).
+- Análise marginal por robô (carteira completa vs. carteira sem o robô
+  X): `contribuicao_marginal` já faz isso para lucro/MDD/ES95/limiar --
+  é o "drop-one" do documento (não é o mesmo que "contribuição de risco"
+  do documento, que é uma decomposição *dentro* da carteira escolhida,
+  ver item novo abaixo).
+- Bootstrap por blocos sincronizado pela mesma data para todos os robôs
+  (não reamostrar cada robô independentemente, que destruiria a
+  correlação de cauda): `robustez_portfolio` (Tarefa 8.1 estendida ao
+  portfólio) já é exatamente o esquema B ("Bootstrap por blocos") do
+  documento.
+- Percentis de MDD/lucro/probabilidade de estourar limiar/margem via
+  Monte Carlo: `robustez_portfolio` já devolve `mdd_p50/p90/p95/p99`,
+  `probabilidade_prejuizo`, `probabilidade_toca_margem`,
+  `probabilidade_termina_abaixo_do_limiar` -- é a "Fase profunda" do
+  documento (seção 12), só falta rodá-la SÓ nos finalistas de uma busca
+  em vez de manualmente sobre um `largo` já fixado (ver funil abaixo).
+
+### Composição vs. escala (separar antes de buscar)
+- [ ] Normalizar cada combinação candidata para proporção (soma = 1) e
+  reduzir pelo MDC do vetor de contratos antes de pontuar -- hoje
+  `[1,2,1]` e `[2,4,2]` são duas linhas independentes em
+  `buscar_combinacoes_portfolio`/`fronteira_pareto`, potencialmente
+  inflando a fronteira com versões escaladas da mesma composição
+  (exatamente o efeito que o documento descreve na seção 2/8). Decisão
+  necessária: marcar como "mesma composição, escala N" na tabela, ou
+  descartar duplicatas de proporção da grade de busca antes de calcular
+  métricas (mais barato, mas perde a curva risco-por-escala de cada
+  composição -- ver item de escala abaixo).
+- [ ] Separar a UI/CLI em dois passos: (1) escolher composição relativa
+  robusta, (2) escalar essa composição até um limite de risco aceitável
+  -- diferente do fluxo atual, que testa a grade completa de composição
+  × escala de uma vez.
+
+### Scores individuais separados (retorno / risco / diversificação)
+- [ ] Três scores por robô SEM somar em nota única (documento é
+  explícito: "não some imediatamente os três" -- combinar pesos é uma
+  convenção de produto que precisa ser decidida com o usuário, AGENTS.md
+  §8). Métricas de cada score em grande parte já existem soltas em
+  `report_data`/`metrics`/`drawdowns` para o modo Robô único -- o
+  trabalho novo é (a) calculá-las por robô dentro do contexto do
+  portfólio (por-contrato, mesma janela) e (b) apresentá-las como 3
+  números lado a lado, não uma combinação.
+- [ ] "EA possui função econômica própria ou duplica outro robô?" --
+  provavelmente decorre da correlação geral já calculada
+  (`correlacao_portfolio`) acima de um limiar a definir com o usuário,
+  não uma métrica nova.
+
+### Clusters de risco e limites por cluster
+- [ ] Agrupar robôs por correlação (geral + dias negativos + cauda) em
+  clusters e IMPOR limite máximo de risco/contratos por cluster nas
+  restrições da busca -- hoje `buscar_combinacoes_portfolio` só limita
+  por robô individual (`max_candidato` por robô na sidebar), não por
+  grupo. Precisa de uma decisão de threshold/método de clustering
+  (o documento não prescreve um algoritmo específico -- "agrupe" é
+  qualitativo) antes de implementar, para não inventar um método de
+  clustering como se fosse convenção do domínio.
+
+### Restrições de sobrevivência (funil, camada 1)
+- [ ] Restrições adicionais na geração/filtro de combinações, hoje
+  ausentes: mínimo de robôs ativos, margem máxima agregada, perda diária
+  estressada máxima, exposição bruta máxima, contribuição máxima de
+  risco por robô. `buscar_combinacoes_portfolio` já tem candidatos por
+  robô (proxy de "máximo por robô") e "0 = excluído" (proxy parcial de
+  liberdade de composição), mas nenhuma restrição JOINT sobre a
+  combinação inteira antes de calculá-la -- adicionar filtros faria a
+  busca também mais rápida (menos combinações chegam a `metricas_agregadas`),
+  não só mais segura, o que conecta com a reclamação original de
+  performance.
+- [ ] Funil de 4 camadas (sobrevivência → eficiência → robustez →
+  simplicidade) substituindo a escolha atual por objetivo único
+  (`selecionar_melhores_combinacoes` hoje ordena por UM critério:
+  RLT, MDD/limiar, ou lucro-com-limite). Isso é uma mudança de UX/fluxo
+  grande, não só uma função nova -- precisa de alinhamento antes de
+  tocar `selecionar_melhores_combinacoes`/`otimizar_portfolio`.
+
+### Curva de limiares (em vez de um único MDD-alvo)
+- [ ] Rodar a busca para vários "MDD máximo aceitável" (ex. R$2.500/
+  5.000/7.500/10.000) e devolver só a carteira de maior RLT de cada --
+  hoje o objetivo `maximizar_lucro_com_limite_mdd` já faz isso para UM
+  `limite_mdd` por chamada; o item novo é gerar a curva inteira (uma
+  chamada por limiar) e apresentar como tabela/gráfico único.
+
+### Robustez local para contratos inteiros (vizinhança ±1)
+- [ ] Para a(s) carteira(s) finalista(s): testar vizinhas a ±1 contrato
+  por robô e transferências de 1 contrato entre dois robôs, comparando
+  a métrica-alvo. "Platô robusto" (vizinhas também boas) vs. "pico
+  isolado" (só a carteira exata é boa) -- não implementado; não depende
+  de nenhuma decisão financeira nova, só itera `buscar_combinacoes_portfolio`
+  numa vizinhança pequena da carteira já escolhida.
+
+### Monte Carlo em duas fases + esquemas adicionais
+- [ ] Restringir Monte Carlo (`robustez_portfolio`) aos ~10-20 finalistas
+  de uma busca, não a toda a grade -- hoje é chamado manualmente sobre
+  UM `largo` fixo na UI, não integrado ao loop de `buscar_combinacoes_portfolio`.
+  Esquema B (bootstrap por blocos) já implementado (ver "já implementado"
+  acima). Faltam:
+  - [ ] Esquema A (embaralhamento simples dos dias, sem criar blocos).
+  - [ ] Esquema C (choques: pior dia repetido, slippage dobrado, perda
+    simultânea de todos os robôs, correlação elevada artificialmente).
+  - [ ] Esquema D (degradação de edge -- expectativa de um robô cai
+    25%/50%/zero/negativa a partir de um ponto aleatório e permanece
+    deteriorada). Já existe uma versão disso no modo Robô único
+    (`tradefolio.deterioracao`, Épico 8.3) mas foi DELIBERADAMENTE não
+    portada para o portfólio (ver Tarefa 10.3: "colunas sem significado
+    agregado coerente entre robôs heterogêneos") -- reabrir essa decisão
+    se o usuário quiser esse cenário no nível de portfólio.
+- [ ] CDaR (Conditional Drawdown at Risk -- média dos drawdowns nos
+  piores percentis simulados) e probabilidade de recuperação em N
+  pregões, ambos citados no documento (seção 12) e ausentes de
+  `robustez_portfolio` hoje (que já tem percentis de MDD e probabilidade
+  de estouro de limiar/margem, mas não CDaR nem P(recuperar) explícitos).
+
+### Epsilon-Pareto (tolerância econômica) e agrupamento
+- [ ] `fronteira_pareto` hoje só deduplica EMPATES EXATOS nos dois eixos
+  -- o documento pede tolerância (ex. 1% em RLT, 2% em MDD) para tratar
+  combinações "economicamente iguais" como uma só, e agrupar pontos
+  próximos apresentando um representante por região. As tolerâncias são
+  uma escolha de produto (não uma convenção financeira do PDF-fonte) --
+  perguntar ao usuário os valores antes de implementar, não inventar
+  1%/2% como padrão silencioso.
+
+### Aproximação inteira da composição-alvo + escolha de escala total
+- [ ] Dada uma composição-alvo em % (ex. de uma otimização contínua
+  hipotética ou de um score consolidado), gerar candidatas inteiras
+  próximas (não só a multiplicação exata) e recalcular RLT/MDD/margem/
+  Monte Carlo para cada uma -- fluxo novo, não uma função isolada.
+  Depende de decidir primeiro como a composição-alvo é obtida (score
+  consolidado da seção de scores acima, ou escolha manual do usuário).
+- [ ] Escala total ligada ao MDD em percentil alto do Monte Carlo (não
+  ao MDD histórico) e a um limite patrimonial informado pelo usuário --
+  ligação direta ao Épico 6 (limiar) mas na direção oposta: aqui é o
+  usuário informando quanto pode perder, não o sistema calculando o
+  limiar necessário.
+
+### Contribuição de risco por robô (dentro da carteira escolhida)
+- [x] `portfolio.contribuicao_risco_por_robo(diarios, percentil_cauda=95,
+  usar_janela_comum=True)` -- distinto de `contribuicao_marginal` (COM
+  vs. SEM o robô, N+1 recomputações): esta é uma decomposição ANALÍTICA
+  de uma carteira já fixada, "quem causou o quê", em três lentes mantidas
+  SEPARADAS (nenhuma soma em nota única, pedido explícito do documento):
+  - Volatilidade via covariância (alocação de Euler:
+    `Cov(robô, portfólio) / vol(portfólio)`, soma exatamente à
+    volatilidade total). **Decisão confirmada com o usuário**: inclui a
+    métrica (a) do documento mesmo reabrindo a convenção de variância/
+    covariância que `fronteira_pareto` rejeita para ESCOLHER contratos
+    discretos -- aqui é só decomposição analítica de uma carteira já
+    fixada, não influencia nenhuma busca nem reintroduz variância como
+    critério de otimização.
+  - Contribuição ao Expected Shortfall -- média do resultado de cada
+    robô nos MESMOS dias que definem o ES{percentil_cauda} do portfólio
+    (mesmo corte de `metrics.var_historico`/`expected_shortfall`).
+  - Contribuição ao drawdown -- **decisão confirmada com o usuário**:
+    usa APENAS o PIOR episódio histórico (`calcular_episodios_drawdown`,
+    o mesmo que já define o MDD de `metricas_agregadas`), não uma média
+    entre episódios -- garante que as participações somem exatamente ao
+    MDD já mostrado em outros lugares da UI. Inclui
+    `frequencia_lidera_perda_drawdown` (fração dos dias do episódio em
+    que aquele robô teve o pior resultado do dia).
+  - As três lentes somam exatamente 100% cada (e as frequências somam
+    1.0) -- verificado por script independente
+    (`dados_exemplo/orders_resgat.csv` + `orders_gridhedge.csv` +
+    `orders_romanos2.csv`, janela comum: volatilidade 682,27 = soma de
+    197,82+119,37+365,08; ES95 -1.136,59 = soma de -427,13-401,66-307,81;
+    MDD -4.452,50 = soma de -3.386,00-288,50-778,00) e por
+    `tests/test_portfolio.py` (5 testes novos, incluindo as invariantes
+    de soma). `usar_janela_comum=False` aplica `largo.fillna(0.0)` antes
+    de qualquer cálculo (mesma convenção de `robustez_portfolio` -- robô
+    inexistente contribui 0, nunca NaN). Wireado em `app.py` (novo
+    expander "Contribuição de risco por robô", três tabelas separadas,
+    logo abaixo de "Contribuição marginal por robô") -- verificado via
+    `AppTest`, valores idênticos ao script de conferência.
+
+### Validação temporal (walk-forward)
+- [ ] Reestimar a composição/contratos em janelas móveis (ex. 6-12 meses
+  de estimação, 1-3 meses de aplicação), aplicar fora da amostra, e medir
+  estabilidade da escolha entre janelas (contrato mediano por robô,
+  variação entre janelas, quantas vezes o candidato permaneceu na
+  fronteira). Não implementado -- é o item que o próprio documento trata
+  como o maior risco não coberto hoje ("selecionar com base na amostra
+  inteira"), mas é também o mais caro de construir (precisa rodar a
+  busca inteira uma vez por janela). Maior candidato a próxima
+  prioridade se o usuário concordar, dado o histórico do robô antigo que
+  degradou (mencionado no documento como motivação direta).
+
+### Shortlist final com perfis nomeados
+- [ ] Em vez de uma única tabela ordenada por objetivo, devolver um
+  conjunto pequeno e nomeado de candidatas: Minimum Risk, Balanced
+  (joelho da fronteira), Growth, Most Robust (melhor médio em
+  walk-forward/stress/vizinhança/degradação -- depende dos itens acima
+  existirem primeiro), Handcrafted Risk (alocação simples por cluster,
+  como benchmark), mais três benchmarks fixos sempre incluídos: carteira
+  atual do usuário, contratos iguais entre robôs, risco inverso
+  (1/volatilidade). Propósito explícito do documento: permitir ao
+  usuário ver se a otimização complexa realmente supera essas
+  referências simples -- não implementar a parte "Most Robust" antes dos
+  itens de robustez local/walk-forward existirem.
+
+### Regra de decisão / scoring pós-filtro
+- [ ] O documento é explícito que isso "não é uma fórmula universal" e
+  que os pesos "devem ser transparentes e ajustáveis" pelo usuário --
+  ou seja, mesmo se implementado, não deve ser um score fixo embutido no
+  código (violaria AGENTS.md §8 se apresentado como convenção do
+  domínio). Se for feito, é um score OPCIONAL, com pesos expostos na UI/
+  CLI, aplicado só DEPOIS dos filtros de sobrevivência -- não como
+  substituto dos objetivos discretos já existentes
+  (`selecionar_melhores_combinacoes`).
