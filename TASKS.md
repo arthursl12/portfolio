@@ -1405,20 +1405,31 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   em vez de manualmente sobre um `largo` já fixado (ver funil abaixo).
 
 ### Composição vs. escala (separar antes de buscar)
-- [ ] Normalizar cada combinação candidata para proporção (soma = 1) e
-  reduzir pelo MDC do vetor de contratos antes de pontuar -- hoje
-  `[1,2,1]` e `[2,4,2]` são duas linhas independentes em
-  `buscar_combinacoes_portfolio`/`fronteira_pareto`, potencialmente
-  inflando a fronteira com versões escaladas da mesma composição
-  (exatamente o efeito que o documento descreve na seção 2/8). Decisão
-  necessária: marcar como "mesma composição, escala N" na tabela, ou
-  descartar duplicatas de proporção da grade de busca antes de calcular
-  métricas (mais barato, mas perde a curva risco-por-escala de cada
-  composição -- ver item de escala abaixo).
+- [x] `portfolio.buscar_combinacoes_portfolio_com_filtros(..., deduplicar_composicao=True)`
+  -- reduz cada vetor de contratos pelo MDC (`math.gcd`) e mantém só a
+  combinação de MENOR escala por composição canônica (decisão tomada:
+  descartar as duplicatas escaladas da grade de busca ANTES de calcular
+  qualquer métrica, não só marcá-las depois -- mais barato, e a curva
+  risco-por-escala de uma composição específica fica para quando for
+  pedida, não bloqueia esta função). Verificado por script + teste
+  (`test_buscar_combinacoes_portfolio_com_filtros_dedupe_composicao`):
+  candidatos `resgat:[0,1,2,4]` × `gridhedge:[0,1,2]` = 12 combinações
+  brutas, 5 são versões escaladas de outra já vista (ex. `[2,2]` de
+  `[1,1]`, `[4,0]`/`[2,0]` de `[1,0]`), sobram 6 composições únicas.
+  **Pedido explícito do usuário**: função NOVA e paralela a
+  `buscar_combinacoes_portfolio` (não uma modificação dela) -- com todos
+  os filtros desligados reproduz exatamente a busca original
+  (`test_buscar_combinacoes_portfolio_com_filtros_equivale_a_busca_original_sem_filtros`),
+  para poder comparar lado a lado sem arriscar o comportamento já
+  testado da função antiga. Wireado em `app.py` como um segundo
+  expander "Otimização de portfólio (busca com filtros de sobrevivência)
+  [novo -- compare com a busca acima]", ao lado do já existente, cada um
+  com seu próprio estado/botão -- verificado via `AppTest` mesmo sem a
+  busca original ter rodado ainda (ambas as seções são independentes).
 - [ ] Separar a UI/CLI em dois passos: (1) escolher composição relativa
   robusta, (2) escalar essa composição até um limite de risco aceitável
-  -- diferente do fluxo atual, que testa a grade completa de composição
-  × escala de uma vez.
+  -- diferente do fluxo atual (mesmo com o dedupe acima), que ainda
+  testa a grade completa de composição × escala de uma vez.
 
 ### Scores individuais separados (retorno / risco / diversificação)
 - [ ] Três scores por robô SEM somar em nota única (documento é
@@ -1445,16 +1456,30 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   clustering como se fosse convenção do domínio.
 
 ### Restrições de sobrevivência (funil, camada 1)
-- [ ] Restrições adicionais na geração/filtro de combinações, hoje
-  ausentes: mínimo de robôs ativos, margem máxima agregada, perda diária
-  estressada máxima, exposição bruta máxima, contribuição máxima de
-  risco por robô. `buscar_combinacoes_portfolio` já tem candidatos por
-  robô (proxy de "máximo por robô") e "0 = excluído" (proxy parcial de
-  liberdade de composição), mas nenhuma restrição JOINT sobre a
-  combinação inteira antes de calculá-la -- adicionar filtros faria a
-  busca também mais rápida (menos combinações chegam a `metricas_agregadas`),
-  não só mais segura, o que conecta com a reclamação original de
-  performance.
+- [x] `min_robos_ativos`/`margem_maxima` (baratos -- só olham a alocação
+  e `margens_por_contrato`, ANTES de sincronizar qualquer série) e
+  `perda_diaria_maxima` (o pior dia HISTÓRICO da combinação,
+  `combinada.min()`, calculado logo após sincronizar -- não um cenário
+  estressado/Monte Carlo, que ficaria caro por combinação; isso
+  continua backlog para uma fase de finalistas, ver Monte Carlo abaixo)
+  -- todos em `buscar_combinacoes_portfolio_com_filtros`, reduzindo
+  quantas combinações chegam ao cálculo caro (`metricas_agregadas`/
+  `limiar_agregado_portfolio`/`rlt_e_risco_portfolio`), o que também
+  ataca a reclamação original de performance. Verificado por script +
+  testes: com `min_robos_ativos=2`/`margem_maxima=12000` sobre a fixture
+  de 12 combinações (resgat/gridhedge/romanos2), 7 são podadas antes de
+  tocar qualquer dado, sobram 5; com `perda_diaria_maxima=-1000`, 7 de
+  11 combinações não-vazias são podadas pelo pior-dia. O `dict` de
+  retorno expõe `n_puladas_*` por camada (dedupe/sobrevivência/pior dia)
+  -- é o que permite VER o efeito de cada filtro, não só o resultado
+  final.
+  - [ ] Ainda não incluídos nesta função (decisão deliberada, não
+    esquecimento): exposição bruta máxima -- nenhuma noção de
+    "exposição" existe hoje no código, inventar uma violaria AGENTS.md
+    §8 sem uma convenção decidida antes; e contribuição máxima de risco
+    por robô -- exigiria rodar `contribuicao_risco_por_robo` por
+    combinação, o oposto de um filtro barato (só faria sentido numa fase
+    de finalistas, não no funil inicial).
 - [ ] Funil de 4 camadas (sobrevivência → eficiência → robustez →
   simplicidade) substituindo a escolha atual por objetivo único
   (`selecionar_melhores_combinacoes` hoje ordena por UM critério:

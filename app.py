@@ -43,6 +43,7 @@ from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
     beneficio_diversificacao,
     buscar_combinacoes_portfolio,
+    buscar_combinacoes_portfolio_com_filtros,
     contribuicao_marginal,
     contribuicao_risco_por_robo,
     correlacao_dias_conjuntos,
@@ -804,6 +805,166 @@ def rodar_modo_portfolio():
                     "fronteira -- as demais têm pelo menos uma outra combinação igual ou melhor nos "
                     "dois eixos ao mesmo tempo."
                 )
+
+        with st.expander("Otimização de portfólio (busca com filtros de sobrevivência) [novo -- compare com a busca acima]"):
+            st.caption(
+                "Backlog de prompts/otimizacao.pdf -- pedido explícito do usuário: seção NOVA e "
+                "paralela à busca acima (não substitui/recalcula nada nela), pensada para "
+                "comparação lado a lado. `buscar_combinacoes_portfolio_com_filtros` reusa o MESMO "
+                "cálculo por combinação; só muda quantas combinações chegam até ele, em 3 camadas "
+                "baratas ANTES do cálculo caro: (1) dedupe de composição/escala -- [2,2] é a MESMA "
+                "composição que [1,1] em outra escala, mantém só a de menor escala; (2) mínimo de "
+                "robôs ativos e margem máxima agregada (baratos, só olham a alocação); (3) pior dia "
+                "histórico máximo (não é um cenário estressado/Monte Carlo -- isso é backlog "
+                "separado, para uma fase de finalistas). Com tudo desligado, reproduz exatamente a "
+                "busca acima."
+            )
+
+            colf1, colf2 = st.columns(2)
+            deduplicar_composicao = colf1.checkbox(
+                "Deduplicar composição/escala", value=True, key="portfolio_filtros_dedupe",
+                help="Descarta combinações que são apenas uma versão escalada de outra já testada "
+                     "(ex. [2,2] vs [1,1]) -- mantém só a de menor escala.",
+            )
+            min_robos_ativos = colf2.number_input(
+                "Mínimo de robôs ativos", min_value=0, max_value=len(candidatos_contratos),
+                value=0, step=1, key="portfolio_filtros_min_ativos",
+            )
+            colf3, colf4 = st.columns(2)
+            margem_maxima_filtro = colf3.number_input(
+                "Margem agregada máxima (R$, vazio = sem limite)", min_value=0.0, value=None,
+                step=1000.0, key="portfolio_filtros_margem_maxima",
+            )
+            perda_diaria_maxima_filtro = colf4.number_input(
+                "Pior dia histórico aceitável (R$, negativo, vazio = sem limite)",
+                max_value=0.0, value=None, step=500.0, key="portfolio_filtros_perda_diaria",
+            )
+
+            chave_busca_filtros_atual = (
+                tuple(sorted((n, tuple(c)) for n, c in candidatos_contratos.items())),
+                tuple(sorted(margens_por_contrato.items())),
+                percentil_cauda, fracao_reserva_operacional_pct, increment, usar_janela_comum,
+                deduplicar_composicao, min_robos_ativos, margem_maxima_filtro, perda_diaria_maxima_filtro,
+            )
+            busca_filtros_desatualizada = (
+                st.session_state.get("portfolio_chave_busca_filtros") != chave_busca_filtros_atual
+            )
+
+            if st.button("Buscar combinações (com filtros)", icon=":material/filter_alt:"):
+                with st.spinner("Calculando..."):
+                    try:
+                        resultado_busca_filtros = buscar_combinacoes_portfolio_com_filtros(
+                            diarios_referencia, margens_por_contrato, candidatos_contratos,
+                            percentil_cauda=percentil_cauda,
+                            fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
+                            increment=increment, usar_janela_comum=usar_janela_comum,
+                            deduplicar_composicao=deduplicar_composicao,
+                            min_robos_ativos=int(min_robos_ativos), margem_maxima=margem_maxima_filtro,
+                            perda_diaria_maxima=perda_diaria_maxima_filtro,
+                        )
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    else:
+                        st.session_state["portfolio_resultado_busca_filtros"] = resultado_busca_filtros
+                        st.session_state["portfolio_chave_busca_filtros"] = chave_busca_filtros_atual
+                        busca_filtros_desatualizada = False
+
+            resultado_busca_filtros = st.session_state.get("portfolio_resultado_busca_filtros")
+            if resultado_busca_filtros is None:
+                st.info("Clique em \"Buscar combinações (com filtros)\" para calcular.")
+            else:
+                if busca_filtros_desatualizada:
+                    st.warning(
+                        "Os candidatos, margens, escopo temporal ou filtros mudaram desde a última "
+                        "busca -- os resultados abaixo ainda refletem a busca anterior."
+                    )
+
+                colr1, colr2, colr3, colr4, colr5 = st.columns(5)
+                colr1.metric("Combinações totais", resultado_busca_filtros["n_combinacoes_totais"])
+                colr2.metric("Puladas (dedupe)", resultado_busca_filtros["n_puladas_composicao_duplicada"])
+                colr3.metric("Puladas (sobrevivência)", resultado_busca_filtros["n_puladas_sobrevivencia"])
+                colr4.metric("Puladas (pior dia)", resultado_busca_filtros["n_puladas_perda_diaria"])
+                colr5.metric("Avaliadas", resultado_busca_filtros["n_avaliadas"])
+
+                resultados_busca_f = resultado_busca_filtros["resultados"]
+                objetivo_rotulo_f = st.radio(
+                    "Objetivo (reordena a tabela já calculada -- não recalcula a busca)",
+                    ["Maximizar RLT", "Minimizar risco (|MDD| / limiar)", "Maximizar lucro (com limite de MDD)"],
+                    key="portfolio_objetivo_otimizacao_filtros",
+                )
+                objetivo_map_f = {
+                    "Maximizar RLT": "maximizar_rlt",
+                    "Minimizar risco (|MDD| / limiar)": "minimizar_mdd_sobre_limiar",
+                    "Maximizar lucro (com limite de MDD)": "maximizar_lucro_com_limite_mdd",
+                }
+                objetivo_otimizacao_f = objetivo_map_f[objetivo_rotulo_f]
+
+                limite_mdd_f = None
+                if objetivo_otimizacao_f == "maximizar_lucro_com_limite_mdd":
+                    limite_mdd_f = st.number_input(
+                        "Limite de MDD (R$, negativo -- ex. -5000)", max_value=0.0, value=None,
+                        step=500.0, key="portfolio_limite_mdd_filtros",
+                    )
+
+                pode_selecionar_f = (
+                    objetivo_otimizacao_f != "maximizar_lucro_com_limite_mdd" or limite_mdd_f is not None
+                )
+                if not pode_selecionar_f:
+                    st.info("Informe o limite de MDD acima para ver a tabela ordenada.")
+                elif not resultados_busca_f:
+                    st.info("Nenhuma combinação sobreviveu aos filtros.")
+                else:
+                    try:
+                        resultado_otimizacao_f = selecionar_melhores_combinacoes(
+                            resultados_busca_f, objetivo=objetivo_otimizacao_f, limite_mdd=limite_mdd_f,
+                        )
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    else:
+                        tabela_otimizacao_f = pd.DataFrame([
+                            {
+                                **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                                "Lucro": fmt(r["lucro_total"], moeda=True),
+                                "MDD": fmt(r["mdd"], moeda=True),
+                                "ES95": fmt(r["es_95"], moeda=True),
+                                "Limiar": fmt(r["limiar_ativo"], moeda=True),
+                                "Score": fmt(r["score"], 4),
+                            }
+                            for r in resultado_otimizacao_f["melhores"]
+                        ])
+                        st.table(tabela_otimizacao_f)
+
+                    st.subheader("Fronteira de Pareto (discreta, sobre a busca filtrada)")
+                    eixos_pareto_f = {
+                        "Lucro vs MDD": ("lucro_total", "mdd"),
+                        "Lucro vs ES95": ("lucro_total", "es_95"),
+                        "RLT vs MDD/limiar": ("rlt_acumulado", "mdd_sobre_limiar"),
+                    }
+                    par_escolhido_f = st.radio(
+                        "Eixos", list(eixos_pareto_f.keys()), key="portfolio_eixos_pareto_filtros", horizontal=True,
+                    )
+                    eixo_retorno_f, eixo_risco_f = eixos_pareto_f[par_escolhido_f]
+
+                    fronteira_f = fronteira_pareto(resultados_busca_f, eixo_retorno_f, eixo_risco_f)
+                    ids_fronteira_f = {id(r) for r in fronteira_f}
+                    rotulo_retorno_f, rotulo_risco_f = par_escolhido_f.split(" vs ")
+                    grafico_pareto_f = pd.DataFrame([
+                        {
+                            rotulo_risco_f: r[eixo_risco_f],
+                            rotulo_retorno_f: r[eixo_retorno_f],
+                            "Na fronteira": "Sim" if id(r) in ids_fronteira_f else "Não",
+                        }
+                        for r in resultados_busca_f
+                    ])
+                    fig_pareto_f = px.scatter(
+                        grafico_pareto_f, x=rotulo_risco_f, y=rotulo_retorno_f,
+                        color="Na fronteira", render_mode="webgl",
+                    )
+                    st.plotly_chart(fig_pareto_f, width="stretch")
+                    st.caption(
+                        f"{len(fronteira_f)} de {len(resultados_busca_f)} combinações avaliadas estão "
+                        "na fronteira."
+                    )
 
         with st.expander("Robustez (Monte Carlo) do portfólio"):
             st.caption(

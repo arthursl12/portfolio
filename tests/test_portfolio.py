@@ -55,6 +55,7 @@ from tradefolio.portfolio import (
     correlacao_portfolio,
     correlacao_volatilidade_alta,
     buscar_combinacoes_portfolio,
+    buscar_combinacoes_portfolio_com_filtros,
     fronteira_pareto,
     limiar_agregado_portfolio,
     metricas_agregadas,
@@ -615,6 +616,135 @@ def test_otimizar_portfolio_equivale_a_busca_mais_selecao():
     composto = selecionar_melhores_combinacoes(resultados, objetivo="maximizar_rlt")
     assert direto["melhores"][0]["alocacao"] == composto["melhores"][0]["alocacao"]
     assert direto["n_combinacoes_testadas"] == composto["n_combinacoes_testadas"]
+
+
+# --- Busca com filtros de sobrevivência + dedupe de composição/escala
+# (backlog de prompts/otimizacao.pdf, fora dos épicos do PDF-fonte) ------
+#
+# Pedido explícito do usuário: NÃO sobrescrever buscar_combinacoes_portfolio
+# (compatibilidade e os testes acima continuam intactos) -- esta é uma
+# função NOVA e paralela, pensada para comparação lado a lado na UI.
+# Reusa o MESMO pipeline por combinação (sincronizar_portfolio/
+# metricas_agregadas/limiar_agregado_portfolio/rlt_e_risco_portfolio) --
+# só muda QUANTAS combinações chegam até ele, em três camadas baratas
+# aplicadas ANTES do cálculo caro, na ordem que cada uma fica disponível:
+#   1. Dedupe de composição/escala: [2,2] é a MESMA composição que [1,1]
+#      em outra escala -- mantém só a de menor escala (documento-fonte
+#      §13: "escolha a menor escala que represente razoavelmente").
+#      Puramente combinatório -- não toca nenhum dado.
+#   2. Filtros de sobrevivência baratos: mínimo de robôs ativos, margem
+#      máxima agregada -- calculados só a partir da alocação e de
+#      `margens_por_contrato`, antes de sincronizar qualquer série.
+#   3. `perda_diaria_maxima`: usa o PIOR DIA HISTÓRICO da combinação
+#      (`combinada.min()`, já disponível logo após sincronizar) -- NÃO
+#      um cenário estressado/Monte Carlo (que ficaria caro por
+#      combinação e é o oposto do funil barato que este filtro deveria
+#      ser; estresse via Monte Carlo é para finalistas, backlog
+#      separado).
+# Deliberadamente NÃO incluídos nesta rodada: exposição bruta (nenhuma
+# noção de "exposição" existe hoje no código -- inventar uma violaria
+# AGENTS.md §8) e contribuição máxima de risco por robô (exigiria rodar
+# `contribuicao_risco_por_robo` por combinação, o oposto de um filtro
+# barato). Valores conferidos por script antes destes testes.
+
+_CANDIDATOS_DEDUPE = {"resgat": [0, 1, 2, 4], "gridhedge": [0, 1, 2]}
+_MARGENS_DEDUPE = {"resgat": 1000.0, "gridhedge": 5000.0}
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_dedupe_composicao():
+    diarios = {k: v for k, v in _diarios_reais().items() if k in ("resgat", "gridhedge")}
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_DEDUPE, _CANDIDATOS_DEDUPE, deduplicar_composicao=True,
+    )
+    assert resultado["n_combinacoes_totais"] == 12
+    assert resultado["n_puladas_composicao_duplicada"] == 5
+    assert resultado["n_puladas_sobrevivencia"] == 0
+    assert resultado["n_puladas_perda_diaria"] == 0
+    assert resultado["n_avaliadas"] == 6
+
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    esperadas = [
+        {"resgat": 0, "gridhedge": 1},
+        {"resgat": 1, "gridhedge": 0},
+        {"resgat": 1, "gridhedge": 1},
+        {"resgat": 1, "gridhedge": 2},
+        {"resgat": 2, "gridhedge": 1},
+        {"resgat": 4, "gridhedge": 1},
+    ]
+    for esperada in esperadas:
+        assert esperada in alocacoes
+    # as versões escaladas NÃO devem sobreviver -- só a de menor escala.
+    assert {"resgat": 0, "gridhedge": 2} not in alocacoes
+    assert {"resgat": 2, "gridhedge": 0} not in alocacoes
+    assert {"resgat": 4, "gridhedge": 0} not in alocacoes
+    assert {"resgat": 2, "gridhedge": 2} not in alocacoes
+    assert {"resgat": 4, "gridhedge": 2} not in alocacoes
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_sobrevivencia():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        min_robos_ativos=2, margem_maxima=12000.0, **_PARAMS_10_8,
+    )
+    assert resultado["n_combinacoes_totais"] == 12
+    assert resultado["n_puladas_composicao_duplicada"] == 0
+    assert resultado["n_puladas_sobrevivencia"] == 7
+    assert resultado["n_puladas_perda_diaria"] == 0
+    assert resultado["n_avaliadas"] == 5
+
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    assert {"resgat": 0, "gridhedge": 1, "romanos2": 2} in alocacoes
+    assert {"resgat": 3, "gridhedge": 0, "romanos2": 2} in alocacoes
+    assert {"resgat": 3, "gridhedge": 1, "romanos2": 0} in alocacoes
+    assert {"resgat": 6, "gridhedge": 0, "romanos2": 2} in alocacoes
+    assert {"resgat": 6, "gridhedge": 1, "romanos2": 0} in alocacoes
+    # margem 13.000/16.000 > 12.000 -- podadas mesmo tendo 3 robôs ativos.
+    assert {"resgat": 3, "gridhedge": 1, "romanos2": 2} not in alocacoes
+    assert {"resgat": 6, "gridhedge": 1, "romanos2": 2} not in alocacoes
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_perda_diaria_maxima():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        perda_diaria_maxima=-1000.0, **_PARAMS_10_8,
+    )
+    assert resultado["n_puladas_perda_diaria"] == 7
+    assert resultado["n_avaliadas"] == 4
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    for esperada in [
+        {"resgat": 0, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 0, "gridhedge": 1, "romanos2": 0},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 0},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 2},
+    ]:
+        assert esperada in alocacoes
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_equivale_a_busca_original_sem_filtros():
+    # Sem nenhum filtro/dedupe ligado, deve reproduzir EXATAMENTE
+    # buscar_combinacoes_portfolio -- é o MESMO pipeline por combinação,
+    # só muda a camada de seleção de quais combinações chegam nele.
+    diarios = _diarios_reais()
+    original = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+    novo = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+    assert novo["n_avaliadas"] == len(original)
+    chave = lambda r: tuple(sorted(r["alocacao"].items()))
+    assert sorted(novo["resultados"], key=chave) == sorted(original, key=chave)
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_excede_limite_levanta_erro():
+    diarios = _diarios_reais()
+    candidatos_grandes = {"resgat": list(range(50)), "gridhedge": list(range(50)), "romanos2": list(range(50))}
+    with pytest.raises(ValueError, match="excede o limite"):
+        buscar_combinacoes_portfolio_com_filtros(
+            diarios, _MARGENS_POR_CONTRATO_10_8, candidatos_grandes,
+        )
 
 
 # --- Robustez (Monte Carlo) do portfólio ---------------------------------

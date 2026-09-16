@@ -639,6 +639,165 @@ def buscar_combinacoes_portfolio(
     return resultados
 
 
+def buscar_combinacoes_portfolio_com_filtros(
+    diarios_referencia: dict,
+    margens_por_contrato: dict,
+    candidatos_contratos: dict,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = None,
+    usar_janela_comum: bool = True,
+    deduplicar_composicao: bool = False,
+    min_robos_ativos: int = 0,
+    margem_maxima: float = None,
+    perda_diaria_maxima: float = None,
+) -> dict:
+    """Backlog de `prompts/otimizacao.pdf` (fora dos épicos do PDF-fonte):
+    variante de `buscar_combinacoes_portfolio` com um funil de filtros
+    baratos ANTES do cálculo caro por combinação. Pedido explícito do
+    usuário: função NOVA e paralela, não uma modificação de
+    `buscar_combinacoes_portfolio` -- para comparar lado a lado na UI, e
+    para não arriscar o comportamento já testado daquela função. Com
+    todos os filtros desligados (os padrões), reproduz EXATAMENTE
+    `buscar_combinacoes_portfolio` -- mesmo pipeline por combinação
+    (`sincronizar_portfolio`/`metricas_agregadas`/
+    `limiar_agregado_portfolio`/`rlt_e_risco_portfolio`), só reorganizado
+    em camadas para permitir podar combinações ANTES de chegar nele:
+
+    1. `deduplicar_composicao=True`: `[2,2]` é a MESMA composição que
+       `[1,1]` em outra escala (reduz cada vetor de contratos pelo MDC) --
+       mantém só a combinação de MENOR escala por composição
+       (documento-fonte §13: "escolha a menor escala que represente
+       razoavelmente"). Puramente combinatório, não toca nenhum dado --
+       roda antes de qualquer outro filtro.
+    2. `min_robos_ativos`/`margem_maxima`: filtros baratos calculados só
+       a partir da alocação (quantos candidatos são > 0) e de
+       `margens_por_contrato` (margem = margem_por_contrato × contratos,
+       somada) -- antes de sincronizar qualquer série diária.
+    3. `perda_diaria_maxima`: depois de sincronizar (e restringir à
+       janela comum, se `usar_janela_comum`), descarta a combinação se o
+       PIOR DIA HISTÓRICO da série combinada (`combinada.min()`, já
+       disponível sem rodar `metricas_agregadas`/`limiar_agregado_
+       portfolio`/`rlt_e_risco_portfolio`) for pior que este limite.
+       Este NÃO é um cenário estressado/Monte Carlo -- rodar Monte Carlo
+       por combinação seria caro demais para um filtro de funil (fica
+       para uma fase de finalistas, backlog separado).
+
+    Deliberadamente NÃO incluídos nesta rodada: exposição bruta (nenhuma
+    noção de "exposição" existe hoje no código -- inventar uma violaria
+    AGENTS.md §8, precisa de uma convenção decidida antes) e contribuição
+    máxima de risco por robô (exigiria rodar `contribuicao_risco_por_robo`
+    por combinação, o oposto de um filtro barato -- também backlog).
+
+    Retorna um `dict` (não uma `list[dict]` como `buscar_combinacoes_
+    portfolio`) para expor a contagem de quantas combinações cada camada
+    podou -- é o que permite comparar o efeito de cada filtro, não só o
+    resultado final:
+    `resultados` (mesmo formato de `buscar_combinacoes_portfolio`,
+    passável direto para `selecionar_melhores_combinacoes`/
+    `fronteira_pareto`, nenhuma duplicação nelas), `n_combinacoes_totais`,
+    `n_puladas_composicao_duplicada`, `n_puladas_sobrevivencia`,
+    `n_puladas_perda_diaria`, `n_avaliadas`.
+
+    Mesmo limite/erro de `buscar_combinacoes_portfolio` para o total
+    BRUTO de combinações (`_LIMITE_COMBINACOES_OTIMIZACAO`) -- os filtros
+    reduzem quantas são efetivamente CALCULADAS, não quantas a
+    especificação de candidatos pode gerar."""
+    nomes = list(diarios_referencia.keys())
+    listas_candidatos = [candidatos_contratos[nome] for nome in nomes]
+
+    combinacoes_brutas = list(itertools.product(*listas_candidatos))
+    n_total = len(combinacoes_brutas)
+    if n_total > _LIMITE_COMBINACOES_OTIMIZACAO:
+        raise ValueError(
+            f"{n_total} combinações excede o limite de {_LIMITE_COMBINACOES_OTIMIZACAO} -- "
+            "reduza o número de candidatos por robô (ou o passo entre eles)"
+        )
+
+    sobreviventes = combinacoes_brutas
+    n_puladas_dedupe = 0
+    if deduplicar_composicao:
+        menor_por_composicao = {}
+        for combinacao in combinacoes_brutas:
+            if not any(combinacao):
+                menor_por_composicao[combinacao] = combinacao  # degenerada (tudo 0), única, sem o que deduplicar
+                continue
+            g = math.gcd(*combinacao)
+            canonica = tuple(n // g for n in combinacao)
+            atual = menor_por_composicao.get(canonica)
+            if atual is None or g < math.gcd(*atual):
+                menor_por_composicao[canonica] = combinacao
+        sobreviventes = list(menor_por_composicao.values())
+        n_puladas_dedupe = n_total - len(sobreviventes)
+
+    resultados = []
+    n_puladas_sobrevivencia = 0
+    n_puladas_perda_diaria = 0
+    for combinacao in sobreviventes:
+        alocacao = dict(zip(nomes, combinacao))
+
+        n_ativos = sum(1 for n in combinacao if n > 0)
+        if n_ativos < min_robos_ativos:
+            n_puladas_sobrevivencia += 1
+            continue
+        margem_total = sum(margens_por_contrato[nome] * n for nome, n in alocacao.items())
+        if margem_maxima is not None and margem_total > margem_maxima:
+            n_puladas_sobrevivencia += 1
+            continue
+
+        diarios_ativos, margens_ativas = {}, {}
+        for nome, n_contratos in alocacao.items():
+            if n_contratos == 0:
+                continue
+            diario = diarios_referencia[nome]
+            diario_simulado = diario.copy()
+            diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos
+            diarios_ativos[nome] = diario_simulado
+            margens_ativas[nome] = margens_por_contrato[nome] * n_contratos
+
+        if not diarios_ativos:
+            continue
+
+        largo = sincronizar_portfolio(diarios_ativos)
+        if usar_janela_comum:
+            try:
+                largo = restringir_janela_comum(largo)
+            except ValueError:
+                continue
+
+        if perda_diaria_maxima is not None:
+            combinada = serie_combinada(largo)
+            if combinada.min() < perda_diaria_maxima:
+                n_puladas_perda_diaria += 1
+                continue
+
+        agregadas = metricas_agregadas(largo)
+        limiar = limiar_agregado_portfolio(
+            largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
+        )
+        limiar_ativo = limiar.get("limiar_recomendado", limiar["limiar_bruto"])
+        rlt = rlt_e_risco_portfolio(largo, limiar=limiar_ativo)
+
+        resultados.append({
+            "alocacao": alocacao,
+            "lucro_total": agregadas["lucro_total"],
+            "mdd": agregadas["mdd"],
+            "es_95": agregadas["es_95"],
+            "limiar_ativo": limiar_ativo,
+            "rlt_acumulado": rlt["rlt_acumulado"],
+            "mdd_sobre_limiar": rlt["mdd_sobre_limiar"],
+        })
+
+    return {
+        "resultados": resultados,
+        "n_combinacoes_totais": n_total,
+        "n_puladas_composicao_duplicada": n_puladas_dedupe,
+        "n_puladas_sobrevivencia": n_puladas_sobrevivencia,
+        "n_puladas_perda_diaria": n_puladas_perda_diaria,
+        "n_avaliadas": len(resultados),
+    }
+
+
 def selecionar_melhores_combinacoes(
     resultados: list[dict],
     objetivo: str,
