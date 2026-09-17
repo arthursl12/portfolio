@@ -44,6 +44,7 @@ from tradefolio.portfolio import (
     beneficio_diversificacao,
     buscar_combinacoes_portfolio,
     buscar_combinacoes_portfolio_com_filtros,
+    clusters_de_risco,
     contribuicao_marginal,
     contribuicao_risco_por_robo,
     correlacao_dias_conjuntos,
@@ -514,6 +515,25 @@ def rodar_modo_portfolio():
         movel = correlacao_movel(largo, janela_pregoes=int(janela_movel))
         st.line_chart(movel)
 
+        st.subheader("Clusters de risco")
+        st.caption(
+            "Backlog de prompts/otimizacao.pdf §4 (\"agrupe EAs que representam o mesmo risco\") "
+            "-- decisão confirmada com o usuário: grafo de limiar + componentes conexos sobre a "
+            "correlação geral (\"Todos os dias\" acima), sem depender de scipy/sklearn. Correlação "
+            "NEGATIVA nunca agrupa (é diversificação, não redundância) -- só correlação positiva "
+            "acima do limiar. Clusters de 1 robô = \"cluster independente\"."
+        )
+        limiar_correlacao_cluster = st.number_input(
+            "Limiar de correlação para agrupar", min_value=-1.0, max_value=1.0, value=0.5, step=0.05,
+            key="portfolio_limiar_correlacao_cluster",
+        )
+        clusters_risco = clusters_de_risco(largo, limiar_correlacao=limiar_correlacao_cluster)
+        st.session_state["portfolio_clusters_risco"] = clusters_risco
+        st.table(pd.DataFrame([
+            {"Cluster": i + 1, "Robôs": ", ".join(cluster), "Tamanho": len(cluster)}
+            for i, cluster in enumerate(clusters_risco)
+        ]))
+
     if len(minimum_margins) == len(diarios):
         limiar_agregado = limiar_agregado_portfolio(
             largo, minimum_margins, percentil_cauda=percentil_cauda,
@@ -915,11 +935,32 @@ def rodar_modo_portfolio():
                 max_value=0.0, value=None, step=500.0, key="portfolio_filtros_perda_diaria",
             )
 
+            clusters_risco_filtro = st.session_state.get("portfolio_clusters_risco")
+            colf5, colf6 = st.columns(2)
+            usar_limite_cluster = colf5.checkbox(
+                "Limitar contratos por cluster de risco", value=False,
+                key="portfolio_filtros_usar_cluster",
+                help="Usa os clusters já detectados no expander \"Correlação entre robôs\" acima "
+                     "(grafo de limiar + componentes conexos sobre a correlação geral).",
+            )
+            max_contratos_por_cluster_filtro = colf6.number_input(
+                "Máximo de contratos por cluster", min_value=1, value=10, step=1,
+                key="portfolio_filtros_max_cluster", disabled=not usar_limite_cluster,
+            )
+            if usar_limite_cluster and clusters_risco_filtro:
+                st.caption(
+                    "Clusters em uso: " + " | ".join(", ".join(c) for c in clusters_risco_filtro)
+                )
+            clusters_para_busca = clusters_risco_filtro if usar_limite_cluster else None
+            max_cluster_para_busca = max_contratos_por_cluster_filtro if usar_limite_cluster else None
+
             chave_busca_filtros_atual = (
                 tuple(sorted((n, tuple(c)) for n, c in candidatos_contratos.items())),
                 tuple(sorted(margens_por_contrato.items())),
                 percentil_cauda, fracao_reserva_operacional_pct, increment, usar_janela_comum,
                 deduplicar_composicao, min_robos_ativos, margem_maxima_filtro, perda_diaria_maxima_filtro,
+                usar_limite_cluster, max_contratos_por_cluster_filtro,
+                tuple(tuple(c) for c in (clusters_risco_filtro or [])),
             )
             busca_filtros_desatualizada = (
                 st.session_state.get("portfolio_chave_busca_filtros") != chave_busca_filtros_atual
@@ -936,6 +977,7 @@ def rodar_modo_portfolio():
                             deduplicar_composicao=deduplicar_composicao,
                             min_robos_ativos=int(min_robos_ativos), margem_maxima=margem_maxima_filtro,
                             perda_diaria_maxima=perda_diaria_maxima_filtro,
+                            clusters=clusters_para_busca, max_contratos_por_cluster=max_cluster_para_busca,
                         )
                     except ValueError as erro:
                         st.error(str(erro))
@@ -954,12 +996,13 @@ def rodar_modo_portfolio():
                         "busca -- os resultados abaixo ainda refletem a busca anterior."
                     )
 
-                colr1, colr2, colr3, colr4, colr5 = st.columns(5)
+                colr1, colr2, colr3, colr4, colr5, colr6 = st.columns(6)
                 colr1.metric("Combinações totais", resultado_busca_filtros["n_combinacoes_totais"])
                 colr2.metric("Puladas (dedupe)", resultado_busca_filtros["n_puladas_composicao_duplicada"])
                 colr3.metric("Puladas (sobrevivência)", resultado_busca_filtros["n_puladas_sobrevivencia"])
-                colr4.metric("Puladas (pior dia)", resultado_busca_filtros["n_puladas_perda_diaria"])
-                colr5.metric("Avaliadas", resultado_busca_filtros["n_avaliadas"])
+                colr4.metric("Puladas (cluster)", resultado_busca_filtros["n_puladas_cluster"])
+                colr5.metric("Puladas (pior dia)", resultado_busca_filtros["n_puladas_perda_diaria"])
+                colr6.metric("Avaliadas", resultado_busca_filtros["n_avaliadas"])
 
                 resultados_busca_f = resultado_busca_filtros["resultados"]
                 objetivo_rotulo_f = st.radio(

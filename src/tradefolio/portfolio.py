@@ -199,6 +199,66 @@ def correlacao_portfolio(largo: pd.DataFrame) -> pd.DataFrame:
     return largo.corr()
 
 
+def clusters_de_risco(largo: pd.DataFrame, limiar_correlacao: float = 0.5) -> list[list[str]]:
+    """Backlog de `prompts/otimizacao.pdf` §4 ("agrupe EAs que
+    representam o mesmo risco"). O documento não prescreve um algoritmo
+    -- método CONFIRMADO com o usuário antes de implementar (AGENTS.md
+    §24, para não inventar uma convenção de clustering como se fosse do
+    domínio): grafo de limiar + componentes conexos, sobre
+    `correlacao_portfolio` (variante "todos os dias", a mesma já usada
+    como padrão no resto do módulo). Dois robôs compartilham um cluster
+    sse a correlação entre eles é `>= limiar_correlacao`; clusters são os
+    componentes conexos do grafo resultante -- robôs sem nenhuma aresta
+    ficam em clusters de 1 (equivalente ao "cluster independente" do
+    exemplo do documento-fonte).
+
+    Sem dependência nova (AGENTS.md §18) -- `scipy`/`sklearn` seriam
+    overkill para o número típico de robôs de um portfólio aqui (2-10);
+    componentes conexos com union-find é suficiente e não pede nada além
+    de `pandas`, já usado.
+
+    Correlação NEGATIVA nunca agrupa, mesmo forte em magnitude --
+    correlação negativa é diversificação (o oposto de "mesmo risco"), só
+    correlação POSITIVA acima do limiar indica redundância. Por isso o
+    filtro é `corr >= limiar_correlacao` diretamente (não
+    `abs(corr) >= limiar_correlacao`).
+
+    Retorna uma lista de clusters (cada um uma lista de nomes), ordenada
+    por tamanho decrescente e depois alfabeticamente dentro de cada
+    cluster e entre clusters do mesmo tamanho -- determinístico, não
+    depende da ordem de iteração de `largo.columns`."""
+    corr = correlacao_portfolio(largo)
+    nomes = list(corr.columns)
+
+    pai = {nome: nome for nome in nomes}
+
+    def _encontrar(nome: str) -> str:
+        raiz = nome
+        while pai[raiz] != raiz:
+            raiz = pai[raiz]
+        while pai[nome] != raiz:
+            pai[nome], nome = raiz, pai[nome]
+        return raiz
+
+    def _unir(a: str, b: str) -> None:
+        raiz_a, raiz_b = _encontrar(a), _encontrar(b)
+        if raiz_a != raiz_b:
+            pai[raiz_a] = raiz_b
+
+    for i, a in enumerate(nomes):
+        for b in nomes[i + 1:]:
+            if corr.loc[a, b] >= limiar_correlacao:
+                _unir(a, b)
+
+    grupos: dict[str, list[str]] = {}
+    for nome in nomes:
+        grupos.setdefault(_encontrar(nome), []).append(nome)
+
+    clusters = [sorted(membros) for membros in grupos.values()]
+    clusters.sort(key=lambda c: (-len(c), c))
+    return clusters
+
+
 def sincronizar_operou(diarios: dict) -> pd.DataFrame:
     """Wide frame do `operou` (booleano) de cada robô, mesmo alinhamento
     por união de datas de `sincronizar_portfolio` -- usado por
@@ -709,6 +769,8 @@ def buscar_combinacoes_portfolio_com_filtros(
     min_robos_ativos: int = 0,
     margem_maxima: float = None,
     perda_diaria_maxima: float = None,
+    clusters: list = None,
+    max_contratos_por_cluster: int = None,
 ) -> dict:
     """Backlog de `prompts/otimizacao.pdf` (fora dos épicos do PDF-fonte):
     variante de `buscar_combinacoes_portfolio` com um funil de filtros
@@ -728,10 +790,16 @@ def buscar_combinacoes_portfolio_com_filtros(
        (documento-fonte §13: "escolha a menor escala que represente
        razoavelmente"). Puramente combinatório, não toca nenhum dado --
        roda antes de qualquer outro filtro.
-    2. `min_robos_ativos`/`margem_maxima`: filtros baratos calculados só
-       a partir da alocação (quantos candidatos são > 0) e de
-       `margens_por_contrato` (margem = margem_por_contrato × contratos,
-       somada) -- antes de sincronizar qualquer série diária.
+    2. `min_robos_ativos`/`margem_maxima`/`max_contratos_por_cluster`:
+       filtros baratos calculados só a partir da alocação (quantos
+       candidatos são > 0, margem = margem_por_contrato × contratos
+       somada, soma de contratos dentro de cada grupo de
+       `clusters` -- ver `clusters_de_risco`) -- antes de sincronizar
+       qualquer série diária. `clusters`/`max_contratos_por_cluster`
+       precisam vir JUNTOS (um sem o outro não filtra nada) -- backlog
+       de prompts/otimizacao.pdf §4/§5 ("nenhum cluster acima de X% do
+       risco"; aqui em contratos, não %, mesma simplificação de
+       `max_candidato` por robô já existente).
     3. `perda_diaria_maxima`: depois de sincronizar (e restringir à
        janela comum, se `usar_janela_comum`), descarta a combinação se o
        PIOR DIA HISTÓRICO da série combinada (`combinada.min()`, já
@@ -755,7 +823,7 @@ def buscar_combinacoes_portfolio_com_filtros(
     passável direto para `selecionar_melhores_combinacoes`/
     `fronteira_pareto`, nenhuma duplicação nelas), `n_combinacoes_totais`,
     `n_puladas_composicao_duplicada`, `n_puladas_sobrevivencia`,
-    `n_puladas_perda_diaria`, `n_avaliadas`.
+    `n_puladas_cluster`, `n_puladas_perda_diaria`, `n_avaliadas`.
 
     Mesmo limite/erro de `buscar_combinacoes_portfolio` para o total
     BRUTO de combinações (`_LIMITE_COMBINACOES_OTIMIZACAO`) -- os filtros
@@ -790,6 +858,7 @@ def buscar_combinacoes_portfolio_com_filtros(
 
     resultados = []
     n_puladas_sobrevivencia = 0
+    n_puladas_cluster = 0
     n_puladas_perda_diaria = 0
     for combinacao in sobreviventes:
         alocacao = dict(zip(nomes, combinacao))
@@ -802,6 +871,14 @@ def buscar_combinacoes_portfolio_com_filtros(
         if margem_maxima is not None and margem_total > margem_maxima:
             n_puladas_sobrevivencia += 1
             continue
+        if clusters is not None and max_contratos_por_cluster is not None:
+            excede_cluster = any(
+                sum(alocacao.get(nome, 0) for nome in cluster) > max_contratos_por_cluster
+                for cluster in clusters
+            )
+            if excede_cluster:
+                n_puladas_cluster += 1
+                continue
 
         largo, margens_ativas = _sincronizar_alocacao(
             alocacao, diarios_referencia, margens_por_contrato, usar_janela_comum,
@@ -824,6 +901,7 @@ def buscar_combinacoes_portfolio_com_filtros(
         "n_combinacoes_totais": n_total,
         "n_puladas_composicao_duplicada": n_puladas_dedupe,
         "n_puladas_sobrevivencia": n_puladas_sobrevivencia,
+        "n_puladas_cluster": n_puladas_cluster,
         "n_puladas_perda_diaria": n_puladas_perda_diaria,
         "n_avaliadas": len(resultados),
     }

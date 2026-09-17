@@ -56,6 +56,7 @@ from tradefolio.portfolio import (
     correlacao_volatilidade_alta,
     buscar_combinacoes_portfolio,
     buscar_combinacoes_portfolio_com_filtros,
+    clusters_de_risco,
     curva_limiares_mdd,
     fronteira_pareto,
     limiar_agregado_portfolio,
@@ -252,6 +253,68 @@ def test_correlacao_movel_primeiros_valores_sao_nan():
     assert "resgat × gridhedge" in movel.columns
     assert movel["resgat × gridhedge"].iloc[:62].isna().all()
     assert movel["resgat × gridhedge"].iloc[-1] == pytest.approx(0.123492, abs=1e-5)
+
+
+# --- Clusters de risco (backlog de prompts/otimizacao.pdf §4, fora dos
+# épicos do PDF-fonte) -----------------------------------------------------
+#
+# "Agrupe EAs que representam o mesmo risco" -- o documento não
+# prescreve um algoritmo. Decisão CONFIRMADA com o usuário (AGENTS.md
+# §24, para não inventar um método de clustering como se fosse convenção
+# do domínio): grafo de limiar + componentes conexos (dois robôs
+# compartilham cluster sse a correlação entre eles >= `limiar_correlacao`;
+# clusters = componentes conexos do grafo), sobre `correlacao_portfolio`
+# (variante "todos os dias", a mesma já usada como padrão no resto do
+# módulo) -- sem depender de scipy/sklearn (AGENTS.md §18, sem
+# dependência nova sem justificativa; o número típico de robôs num
+# portfólio aqui, 2-10, não pede nada mais sofisticado). Correlação
+# NEGATIVA nunca agrupa (mesmo forte) -- correlação negativa é
+# diversificação, o oposto do que "mesmo risco" significa aqui; só
+# correlação POSITIVA acima do limiar indica redundância.
+#
+# Dados sintéticos (não os robôs reais -- a correlação entre
+# resgat/gridhedge/romanos2 é baixa demais, ~0,06/0,06/-0,02, para
+# exercitar o agrupamento de verdade): a/b perfeitamente correlacionados
+# (corr=1.0), c/d perfeitamente correlacionados (corr=1.0), e
+# independente; a/c são NEGATIVAMENTE correlacionados (-0.68) -- não
+# devem agrupar mesmo sendo "fortes" em magnitude.
+
+_LARGO_CLUSTERS_SINTETICO = pd.DataFrame({
+    "a": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "b": [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+    "c": [10, 8, 6, 9, 7, 5, 11, 4, 3, 2],
+    "d": [20, 16, 12, 18, 14, 10, 22, 8, 6, 4],
+    "e": [3, 7, 1, 9, 2, 8, 4, 6, 5, 0],
+})
+
+
+def test_clusters_de_risco_agrupa_por_correlacao_positiva():
+    clusters = clusters_de_risco(_LARGO_CLUSTERS_SINTETICO, limiar_correlacao=0.5)
+    assert sorted(sorted(c) for c in clusters) == [["a", "b"], ["c", "d"], ["e"]]
+
+
+def test_clusters_de_risco_correlacao_negativa_nunca_agrupa():
+    # a e c têm |corr| = 0.68 (mais forte em magnitude que muitos pares
+    # positivos), mas são NEGATIVAMENTE correlacionados -- mesmo com um
+    # limiar baixo o suficiente para incluir 0.68 em magnitude, a e c não
+    # devem cair no mesmo cluster.
+    clusters = clusters_de_risco(_LARGO_CLUSTERS_SINTETICO, limiar_correlacao=0.6)
+    grupos = {frozenset(c) for c in clusters}
+    assert frozenset({"a", "c"}) not in grupos
+    assert frozenset({"a", "b"}) in grupos
+    assert frozenset({"c", "d"}) in grupos
+
+
+def test_clusters_de_risco_limiar_alto_todos_independentes():
+    clusters = clusters_de_risco(_LARGO_CLUSTERS_SINTETICO, limiar_correlacao=1.01)
+    assert sorted(sorted(c) for c in clusters) == [["a"], ["b"], ["c"], ["d"], ["e"]]
+
+
+def test_clusters_de_risco_robos_reais_baixa_correlacao_ficam_independentes():
+    diarios = _diarios_reais()
+    largo = restringir_janela_comum(sincronizar_portfolio(diarios))
+    clusters = clusters_de_risco(largo, limiar_correlacao=0.5)
+    assert sorted(sorted(c) for c in clusters) == [["gridhedge"], ["resgat"], ["romanos2"]]
 
 
 # --- Tarefa 10.3 (extensão): RLT e risco normalizado do portfólio -------
@@ -704,6 +767,30 @@ def test_buscar_combinacoes_portfolio_com_filtros_sobrevivencia():
     # margem 13.000/16.000 > 12.000 -- podadas mesmo tendo 3 robôs ativos.
     assert {"resgat": 3, "gridhedge": 1, "romanos2": 2} not in alocacoes
     assert {"resgat": 6, "gridhedge": 1, "romanos2": 2} not in alocacoes
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_limite_por_cluster():
+    # Continuação de "Clusters de risco": impor um limite de contratos
+    # POR CLUSTER (não só por robô individual) nas restrições da busca --
+    # backlog de prompts/otimizacao.pdf §4/§5. resgat+gridhedge no mesmo
+    # cluster (hipotético, não pela correlação real -- só para testar a
+    # restrição em si), romanos2 sozinho.
+    diarios = _diarios_reais()
+    clusters = [["resgat", "gridhedge"], ["romanos2"]]
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        clusters=clusters, max_contratos_por_cluster=6, **_PARAMS_10_8,
+    )
+    assert resultado["n_combinacoes_totais"] == 12
+    assert resultado["n_puladas_cluster"] == 2
+    assert resultado["n_avaliadas"] == 9
+
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    # resgat=6 + gridhedge=1 -> 7 contratos no cluster, acima do limite.
+    assert {"resgat": 6, "gridhedge": 1, "romanos2": 0} not in alocacoes
+    assert {"resgat": 6, "gridhedge": 1, "romanos2": 2} not in alocacoes
+    # resgat=6 sozinho (gridhedge=0) fica exatamente no limite (6) -- passa.
+    assert {"resgat": 6, "gridhedge": 0, "romanos2": 2} in alocacoes
 
 
 def test_buscar_combinacoes_portfolio_com_filtros_perda_diaria_maxima():

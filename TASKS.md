@@ -1446,14 +1446,34 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   não uma métrica nova.
 
 ### Clusters de risco e limites por cluster
-- [ ] Agrupar robôs por correlação (geral + dias negativos + cauda) em
-  clusters e IMPOR limite máximo de risco/contratos por cluster nas
-  restrições da busca -- hoje `buscar_combinacoes_portfolio` só limita
-  por robô individual (`max_candidato` por robô na sidebar), não por
-  grupo. Precisa de uma decisão de threshold/método de clustering
-  (o documento não prescreve um algoritmo específico -- "agrupe" é
-  qualitativo) antes de implementar, para não inventar um método de
-  clustering como se fosse convenção do domínio.
+- [x] `portfolio.clusters_de_risco(largo, limiar_correlacao=0.5)` --
+  **método confirmado com o usuário antes de implementar** (AGENTS.md
+  §24, documento não prescreve um algoritmo): grafo de limiar +
+  componentes conexos (union-find, sem `scipy`/`sklearn` -- AGENTS.md
+  §18, número típico de robôs aqui de 2-10 não pede nada mais
+  sofisticado) sobre `correlacao_portfolio` (variante "todos os dias",
+  também confirmada com o usuário -- a mesma já usada como padrão no
+  resto do módulo). Dois robôs compartilham cluster sse a correlação
+  entre eles é `>= limiar_correlacao`; correlação NEGATIVA nunca agrupa
+  (mesmo forte em magnitude) -- é diversificação, o oposto do que
+  "mesmo risco" significa aqui. Verificado com dados sintéticos (4
+  testes: agrupamento por correlação positiva, correlação negativa
+  nunca agrupa mesmo com |corr| alta, limiar acima de 1 deixa todos
+  independentes) e contra os robôs reais (resgat/gridhedge/romanos2
+  ficam cada um em cluster próprio -- correlação real entre eles é
+  ~0,06/0,06/-0,02, bem abaixo de qualquer limiar razoável).
+- [x] `buscar_combinacoes_portfolio_com_filtros(..., clusters=...,
+  max_contratos_por_cluster=...)` -- impõe o limite JOINTO de contratos
+  por cluster (não só por robô individual) como mais uma camada barata
+  do funil de sobrevivência (soma de contratos dentro de cada grupo de
+  `clusters`, calculada só a partir da alocação, antes de tocar
+  qualquer dado). Contador próprio `n_puladas_cluster` no retorno, para
+  o efeito desse filtro ficar visível separado dos demais. Wireado em
+  `app.py`: os clusters aparecem no expander "Correlação entre robôs"
+  (limiar ajustável ao vivo) e ficam disponíveis para o expander de
+  busca com filtros marcar "Limitar contratos por cluster de risco" --
+  verificado via `AppTest` contra dados reais (195 combinações, 89
+  podadas com limite de 4 contratos por cluster).
 
 ### Restrições de sobrevivência (funil, camada 1)
 - [x] `min_robos_ativos`/`margem_maxima` (baratos -- só olham a alocação
