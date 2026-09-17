@@ -52,6 +52,7 @@ from tradefolio.portfolio import (
     correlacao_piores_dias,
     correlacao_portfolio,
     correlacao_volatilidade_alta,
+    curva_limiares_mdd,
     fronteira_pareto,
     limiar_agregado_portfolio,
     metricas_agregadas,
@@ -61,6 +62,7 @@ from tradefolio.portfolio import (
     selecionar_melhores_combinacoes,
     sincronizar_operou,
     sincronizar_portfolio,
+    vizinhanca_local,
 )
 from tradefolio.report_data import (
     JANELAS_DISPONIVEIS,
@@ -769,7 +771,27 @@ def rodar_modo_portfolio():
                 )
                 eixo_retorno, eixo_risco = eixos_pareto[par_escolhido]
 
-                fronteira = fronteira_pareto(resultados_busca, eixo_retorno, eixo_risco)
+                st.caption(
+                    "Epsilon-Pareto (backlog): combinações dentro dessa tolerância uma da outra "
+                    "nos dois eixos contam como \"economicamente iguais\" e colapsam num só "
+                    "representante -- 0% em ambos preserva a fronteira estrita (só dedup de "
+                    "empates exatos). Valores iniciais (1%/2%) são o exemplo do documento-fonte, "
+                    "não um padrão fixo -- ajustáveis ao vivo."
+                )
+                coltol1, coltol2 = st.columns(2)
+                tolerancia_retorno_pct = coltol1.number_input(
+                    "Tolerância no retorno (%)", min_value=0.0, value=1.0, step=0.5,
+                    key="portfolio_pareto_tolerancia_retorno",
+                )
+                tolerancia_risco_pct = coltol2.number_input(
+                    "Tolerância no risco (%)", min_value=0.0, value=2.0, step=0.5,
+                    key="portfolio_pareto_tolerancia_risco",
+                )
+
+                fronteira = fronteira_pareto(
+                    resultados_busca, eixo_retorno, eixo_risco,
+                    tolerancia_retorno_pct=tolerancia_retorno_pct, tolerancia_risco_pct=tolerancia_risco_pct,
+                )
                 ids_fronteira = {id(r) for r in fronteira}
                 rotulo_retorno, rotulo_risco = par_escolhido.split(" vs ")
                 grafico_pareto = pd.DataFrame([
@@ -796,6 +818,7 @@ def rodar_modo_portfolio():
                         **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
                         rotulo_retorno: fmt(r[eixo_retorno], 4 if "rlt" in eixo_retorno else 2),
                         rotulo_risco: fmt(r[eixo_risco], 4 if "limiar" in eixo_risco else 2),
+                        "Combinações agrupadas (epsilon)": len(r.get("_agrupados", [])),
                     }
                     for r in fronteira
                 ])
@@ -803,8 +826,60 @@ def rodar_modo_portfolio():
                 st.caption(
                     f"{len(fronteira)} de {len(resultados_busca)} combinações calculadas estão na "
                     "fronteira -- as demais têm pelo menos uma outra combinação igual ou melhor nos "
-                    "dois eixos ao mesmo tempo."
+                    "dois eixos ao mesmo tempo (ou foram agrupadas por tolerância epsilon a um "
+                    "representante acima -- ver abaixo quais)."
                 )
+                total_agrupadas = sum(len(r.get("_agrupados", [])) for r in fronteira)
+                if total_agrupadas:
+                    with st.expander(f"Ver as {total_agrupadas} combinações agrupadas por tolerância (não aparecem na tabela acima)"):
+                        tabela_agrupadas = pd.DataFrame([
+                            {
+                                "Representante": ", ".join(f"{nome}={v}" for nome, v in r["alocacao"].items()),
+                                **{f"Contratos {nome}": v for nome, v in agrupado["alocacao"].items()},
+                                rotulo_retorno: fmt(agrupado[eixo_retorno], 4 if "rlt" in eixo_retorno else 2),
+                                rotulo_risco: fmt(agrupado[eixo_risco], 4 if "limiar" in eixo_risco else 2),
+                            }
+                            for r in fronteira
+                            for agrupado in r.get("_agrupados", [])
+                        ])
+                        st.table(tabela_agrupadas)
+
+                st.subheader("Curva de limiares (MDD máximo -> melhor RLT)")
+                st.caption(
+                    "Backlog de prompts/otimizacao.pdf §7: em vez de um único MDD máximo, gera a "
+                    "curva inteira -- para cada limite, a carteira já calculada de maior RLT entre "
+                    "as que não violam esse limite. Distinto do objetivo \"Maximizar lucro (com "
+                    "limite de MDD)\" acima, que otimiza LUCRO sob a mesma restrição -- aqui o "
+                    "critério é RLT, não lucro bruto."
+                )
+                limites_texto = st.text_input(
+                    "Limites de MDD (R$, negativos, separados por vírgula)",
+                    value="-2500,-5000,-7500,-10000", key="portfolio_curva_limites_mdd",
+                )
+                try:
+                    limites_mdd = [float(x.strip()) for x in limites_texto.split(",") if x.strip()]
+                except ValueError:
+                    st.error("Não consegui interpretar os limites -- use números separados por vírgula.")
+                else:
+                    curva = curva_limiares_mdd(resultados_busca, limites_mdd)
+                    tabela_curva = pd.DataFrame([
+                        {
+                            "Limite de MDD": fmt(ponto["limite_mdd"], moeda=True),
+                            "Combinações válidas": ponto["n_combinacoes_validas"],
+                            **(
+                                {
+                                    **{f"Contratos {nome}": v for nome, v in ponto["melhor"]["alocacao"].items()},
+                                    "RLT": fmt(ponto["melhor"]["rlt_acumulado"], 4),
+                                    "Lucro": fmt(ponto["melhor"]["lucro_total"], moeda=True),
+                                    "MDD": fmt(ponto["melhor"]["mdd"], moeda=True),
+                                }
+                                if ponto["melhor"] is not None
+                                else {"RLT": "-- (nenhuma combinação satisfaz este limite)"}
+                            ),
+                        }
+                        for ponto in curva
+                    ])
+                    st.table(tabela_curva)
 
         with st.expander("Otimização de portfólio (busca com filtros de sobrevivência) [novo -- compare com a busca acima]"):
             st.caption(
@@ -945,7 +1020,20 @@ def rodar_modo_portfolio():
                     )
                     eixo_retorno_f, eixo_risco_f = eixos_pareto_f[par_escolhido_f]
 
-                    fronteira_f = fronteira_pareto(resultados_busca_f, eixo_retorno_f, eixo_risco_f)
+                    coltol1_f, coltol2_f = st.columns(2)
+                    tolerancia_retorno_pct_f = coltol1_f.number_input(
+                        "Tolerância no retorno (%)", min_value=0.0, value=1.0, step=0.5,
+                        key="portfolio_pareto_tolerancia_retorno_filtros",
+                    )
+                    tolerancia_risco_pct_f = coltol2_f.number_input(
+                        "Tolerância no risco (%)", min_value=0.0, value=2.0, step=0.5,
+                        key="portfolio_pareto_tolerancia_risco_filtros",
+                    )
+
+                    fronteira_f = fronteira_pareto(
+                        resultados_busca_f, eixo_retorno_f, eixo_risco_f,
+                        tolerancia_retorno_pct=tolerancia_retorno_pct_f, tolerancia_risco_pct=tolerancia_risco_pct_f,
+                    )
                     ids_fronteira_f = {id(r) for r in fronteira_f}
                     rotulo_retorno_f, rotulo_risco_f = par_escolhido_f.split(" vs ")
                     grafico_pareto_f = pd.DataFrame([
@@ -961,10 +1049,100 @@ def rodar_modo_portfolio():
                         color="Na fronteira", render_mode="webgl",
                     )
                     st.plotly_chart(fig_pareto_f, width="stretch")
+
+                    tabela_pareto_f = pd.DataFrame([
+                        {
+                            **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                            rotulo_retorno_f: fmt(r[eixo_retorno_f], 4 if "rlt" in eixo_retorno_f else 2),
+                            rotulo_risco_f: fmt(r[eixo_risco_f], 4 if "limiar" in eixo_risco_f else 2),
+                            "Combinações agrupadas (epsilon)": len(r.get("_agrupados", [])),
+                        }
+                        for r in fronteira_f
+                    ])
+                    st.table(tabela_pareto_f)
                     st.caption(
                         f"{len(fronteira_f)} de {len(resultados_busca_f)} combinações avaliadas estão "
-                        "na fronteira."
+                        "na fronteira (ou foram agrupadas por tolerância epsilon -- ver abaixo quais)."
                     )
+                    total_agrupadas_f = sum(len(r.get("_agrupados", [])) for r in fronteira_f)
+                    if total_agrupadas_f:
+                        with st.expander(f"Ver as {total_agrupadas_f} combinações agrupadas por tolerância (não aparecem na tabela acima)"):
+                            tabela_agrupadas_f = pd.DataFrame([
+                                {
+                                    "Representante": ", ".join(f"{nome}={v}" for nome, v in r["alocacao"].items()),
+                                    **{f"Contratos {nome}": v for nome, v in agrupado["alocacao"].items()},
+                                    rotulo_retorno_f: fmt(agrupado[eixo_retorno_f], 4 if "rlt" in eixo_retorno_f else 2),
+                                    rotulo_risco_f: fmt(agrupado[eixo_risco_f], 4 if "limiar" in eixo_risco_f else 2),
+                                }
+                                for r in fronteira_f
+                                for agrupado in r.get("_agrupados", [])
+                            ])
+                            st.table(tabela_agrupadas_f)
+
+        with st.expander("Robustez local (vizinhança ±1 contrato)"):
+            st.caption(
+                "Backlog de prompts/otimizacao.pdf §9 -- para uma carteira-base, testa vizinhas a "
+                "±1 contrato por robô e transferências de 1 contrato entre pares de robôs. "
+                "\"Se a carteira é excelente mas todas as vizinhas são ruins, ela provavelmente "
+                "explora uma coincidência histórica. Se a carteira e as vizinhas são boas, é um "
+                "platô robusto\" -- esta seção não decide isso por você, só mostra os números lado "
+                "a lado."
+            )
+            cols_base = st.columns(len(diarios_referencia))
+            alocacao_base_vizinhanca = {}
+            for col, nome in zip(cols_base, diarios_referencia.keys()):
+                alocacao_base_vizinhanca[nome] = col.number_input(
+                    f"{nome}: contratos (base)", min_value=0,
+                    value=resumo_robos.get(nome, {}).get("n_contratos", 1),
+                    step=1, key=f"portfolio_vizinhanca_base::{nome}",
+                )
+            incluir_transferencias = st.checkbox(
+                "Incluir transferências entre robôs (-1 num, +1 noutro)", value=True,
+                key="portfolio_vizinhanca_transferencias",
+            )
+
+            if st.button("Testar vizinhança", icon=":material/hub:"):
+                try:
+                    resultado_vizinhanca = vizinhanca_local(
+                        alocacao_base_vizinhanca, diarios_referencia, margens_por_contrato,
+                        percentil_cauda=percentil_cauda,
+                        fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
+                        increment=increment, usar_janela_comum=usar_janela_comum,
+                        incluir_transferencias=incluir_transferencias,
+                    )
+                except ValueError as erro:
+                    st.error(str(erro))
+                else:
+                    st.session_state["portfolio_resultado_vizinhanca"] = resultado_vizinhanca
+
+            resultado_vizinhanca = st.session_state.get("portfolio_resultado_vizinhanca")
+            if resultado_vizinhanca is None:
+                st.info("Clique em \"Testar vizinhança\" para calcular a base e suas vizinhas.")
+            else:
+                base = resultado_vizinhanca["base"]
+                linhas = [{
+                    "Tipo": "BASE",
+                    **{f"Contratos {nome}": v for nome, v in base["alocacao"].items()},
+                    "RLT": fmt(base["rlt_acumulado"], 4),
+                    "Δ RLT vs. base": "--",
+                    "Lucro": fmt(base["lucro_total"], moeda=True),
+                    "MDD": fmt(base["mdd"], moeda=True),
+                }]
+                for v in resultado_vizinhanca["vizinhas"]:
+                    linhas.append({
+                        "Tipo": v["tipo"],
+                        **{f"Contratos {nome}": val for nome, val in v["alocacao"].items()},
+                        "RLT": fmt(v["rlt_acumulado"], 4),
+                        "Δ RLT vs. base": fmt(v["rlt_acumulado"] - base["rlt_acumulado"], 4),
+                        "Lucro": fmt(v["lucro_total"], moeda=True),
+                        "MDD": fmt(v["mdd"], moeda=True),
+                    })
+                st.table(pd.DataFrame(linhas))
+                st.caption(
+                    f"{len(resultado_vizinhanca['vizinhas'])} vizinhas avaliadas (algumas podem ter "
+                    "sido omitidas por não terem janela comum ou ficarem degeneradas -- 0 contratos "
+                    "em todos os robôs)."
+                )
 
         with st.expander("Robustez (Monte Carlo) do portfólio"):
             st.caption(

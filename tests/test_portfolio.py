@@ -56,6 +56,7 @@ from tradefolio.portfolio import (
     correlacao_volatilidade_alta,
     buscar_combinacoes_portfolio,
     buscar_combinacoes_portfolio_com_filtros,
+    curva_limiares_mdd,
     fronteira_pareto,
     limiar_agregado_portfolio,
     metricas_agregadas,
@@ -67,6 +68,7 @@ from tradefolio.portfolio import (
     serie_combinada,
     sincronizar_operou,
     sincronizar_portfolio,
+    vizinhanca_local,
 )
 from tradefolio.report_data import montar_dataframe_diario
 
@@ -747,6 +749,160 @@ def test_buscar_combinacoes_portfolio_com_filtros_excede_limite_levanta_erro():
         )
 
 
+# --- Curva de limiares (backlog de prompts/otimizacao.pdf, fora dos
+# épicos do PDF-fonte) -----------------------------------------------------
+#
+# Documento-fonte §7: em vez de pedir ao usuário um único MDD máximo,
+# gerar uma curva com vários limiares e, "para cada limiar, retornar
+# somente a carteira de maior RLT". Distinto do objetivo já existente
+# "maximizar_lucro_com_limite_mdd" em `selecionar_melhores_combinacoes`
+# (que maximiza LUCRO sob a mesma restrição de MDD) -- RLT e lucro bruto
+# são objetivos diferentes, substituir um pelo outro silenciosamente
+# desrepresentaria o que "melhor" significa aqui (AGENTS.md §8), por
+# isso `curva_limiares_mdd` é uma função própria, não uma chamada
+# repetida ao objetivo já existente. Valores conferidos por script antes
+# destes testes.
+
+
+def test_curva_limiares_mdd():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+    )
+    curva = curva_limiares_mdd(resultados, limites_mdd=[-1000.0, -2000.0, -3000.0, -5000.0])
+
+    assert [ponto["limite_mdd"] for ponto in curva] == [-1000.0, -2000.0, -3000.0, -5000.0]
+
+    assert curva[0]["n_combinacoes_validas"] == 0
+    assert curva[0]["melhor"] is None
+    assert curva[1]["n_combinacoes_validas"] == 0
+    assert curva[1]["melhor"] is None
+
+    assert curva[2]["n_combinacoes_validas"] == 4
+    assert curva[2]["melhor"]["alocacao"] == {"resgat": 3, "gridhedge": 0, "romanos2": 0}
+    assert curva[2]["melhor"]["rlt_acumulado"] == pytest.approx(3.1794545454545453, abs=1e-6)
+
+    assert curva[3]["n_combinacoes_validas"] == 11
+    assert curva[3]["melhor"]["alocacao"] == {"resgat": 6, "gridhedge": 0, "romanos2": 0}
+    assert curva[3]["melhor"]["rlt_acumulado"] == pytest.approx(3.330857142857143, abs=1e-6)
+
+
+def test_curva_limiares_mdd_lista_vazia():
+    assert curva_limiares_mdd([], limites_mdd=[-1000.0]) == [
+        {"limite_mdd": -1000.0, "n_combinacoes_validas": 0, "melhor": None},
+    ]
+
+
+# --- Robustez local para contratos inteiros (backlog de
+# prompts/otimizacao.pdf §9, fora dos épicos do PDF-fonte) ----------------
+#
+# "Teste vizinhas [±1 contrato por robô, uma de cada vez] e transferências
+# [-1 num robô, +1 noutro]. Se a carteira é excelente mas todas as
+# vizinhas são ruins, ela provavelmente explora uma coincidência
+# histórica. Se a carteira e as vizinhas são boas, é um platô robusto."
+# `vizinhanca_local` NÃO decide "robusto ou não" (é uma tolerância de
+# produto, não uma convenção do PDF-fonte) -- só calcula a base e cada
+# vizinha, mesmo formato de `buscar_combinacoes_portfolio` mais um campo
+# `tipo` identificando a perturbação. Reusa `_sincronizar_alocacao`/
+# `_metricas_de_alocacao` (extraídos de `buscar_combinacoes_portfolio_
+# com_filtros` para as duas funções novas compartilharem -- a função
+# ORIGINAL `buscar_combinacoes_portfolio` permanece intocada, pedido
+# explícito do usuário). Valores conferidos por script (uma "busca" de
+# 1 candidato por vizinha, via `buscar_combinacoes_portfolio` já testada)
+# antes destes testes.
+
+_BASE_VIZINHANCA = {"resgat": 3, "gridhedge": 1, "romanos2": 2}
+
+
+def test_vizinhanca_local_base_e_contagem():
+    diarios = _diarios_reais()
+    resultado = vizinhanca_local(
+        _BASE_VIZINHANCA, diarios, _MARGENS_POR_CONTRATO_10_8, **_PARAMS_10_8,
+    )
+    assert resultado["base"]["alocacao"] == _BASE_VIZINHANCA
+    assert resultado["base"]["mdd"] == pytest.approx(-3281.0, abs=1e-2)
+    assert resultado["base"]["rlt_acumulado"] == pytest.approx(2.0669958823529413, abs=1e-6)
+    # 3 robôs × 2 (±1) + 6 transferências (permutations de 3, 2 a 2)
+    assert len(resultado["vizinhas"]) == 12
+
+
+def test_vizinhanca_local_perturbacao_unica_por_robo():
+    # "tipo" identifica QUAL robô mudou (ex. "±1 resgat"), não a direção
+    # -- as duas direções (-1/+1) do mesmo robô compartilham o mesmo
+    # rótulo de tipo; a direção já está implícita na própria `alocacao`.
+    diarios = _diarios_reais()
+    resultado = vizinhanca_local(
+        _BASE_VIZINHANCA, diarios, _MARGENS_POR_CONTRATO_10_8, **_PARAMS_10_8,
+    )
+    tipos_resgat = [v for v in resultado["vizinhas"] if v["tipo"] == "±1 resgat"]
+    assert len(tipos_resgat) == 2  # -1 e +1
+
+    esperados = {
+        ("resgat", 2): (-3323.5, 2.0611622916666663, 32978.596666666665),
+        ("resgat", 4): (-3323.8333333333344, 2.0161763963963963, 37299.26333333333),
+        ("gridhedge", 0): (-2755.5, 2.4581304347826087, 28268.5),
+        ("gridhedge", 2): (-4928.100000000002, 1.7503900000000001, 42009.36),
+        ("romanos2", 1): (-2379.01, 1.7317985714285715, 24245.18),
+        ("romanos2", 3): (-4722.5, 2.2454965853658537, 46032.68),
+    }
+    vizinhas_por_alocacao = {tuple(sorted(v["alocacao"].items())): v for v in resultado["vizinhas"]}
+    for (nome, novo_valor), (mdd, rlt, lucro) in esperados.items():
+        aloc = dict(_BASE_VIZINHANCA)
+        aloc[nome] = novo_valor
+        v = vizinhas_por_alocacao[tuple(sorted(aloc.items()))]
+        assert v["tipo"] == f"±1 {nome}"
+        assert v["mdd"] == pytest.approx(mdd, abs=1e-2)
+        assert v["rlt_acumulado"] == pytest.approx(rlt, abs=1e-6)
+        assert v["lucro_total"] == pytest.approx(lucro, abs=1e-2)
+
+
+def test_vizinhanca_local_transferencias():
+    diarios = _diarios_reais()
+    resultado = vizinhanca_local(
+        _BASE_VIZINHANCA, diarios, _MARGENS_POR_CONTRATO_10_8, **_PARAMS_10_8,
+    )
+    vizinhas_por_alocacao = {tuple(sorted(v["alocacao"].items())): v for v in resultado["vizinhas"]}
+
+    caso = {"resgat": 2, "gridhedge": 2, "romanos2": 2}  # transferência resgat->gridhedge
+    v = vizinhas_por_alocacao[tuple(sorted(caso.items()))]
+    assert v["tipo"] == "transferência resgat -> gridhedge"
+    assert v["mdd"] == pytest.approx(-5471.433333333334, abs=1e-2)
+    assert v["rlt_acumulado"] == pytest.approx(1.6957032624113475, abs=1e-6)
+
+    caso2 = {"resgat": 3, "gridhedge": 0, "romanos2": 3}  # transferência gridhedge->romanos2
+    v2 = vizinhas_por_alocacao[tuple(sorted(caso2.items()))]
+    assert v2["tipo"] == "transferência gridhedge -> romanos2"
+    assert v2["rlt_acumulado"] == pytest.approx(2.6108166666666666, abs=1e-6)
+
+
+def test_vizinhanca_local_nunca_gera_contratos_negativos():
+    diarios = _diarios_reais()
+    resultado = vizinhanca_local(
+        {"resgat": 0, "gridhedge": 1, "romanos2": 2}, diarios, _MARGENS_POR_CONTRATO_10_8, **_PARAMS_10_8,
+    )
+    for v in resultado["vizinhas"]:
+        assert all(n >= 0 for n in v["alocacao"].values())
+    # resgat=0 só tem a direção +1 -- "±1 resgat" -1 não deveria existir
+    tipos = [v["tipo"] for v in resultado["vizinhas"]]
+    assert tipos.count("±1 resgat") == 1
+
+
+def test_vizinhanca_local_sem_transferencias():
+    diarios = _diarios_reais()
+    resultado = vizinhanca_local(
+        _BASE_VIZINHANCA, diarios, _MARGENS_POR_CONTRATO_10_8,
+        incluir_transferencias=False, **_PARAMS_10_8,
+    )
+    assert len(resultado["vizinhas"]) == 6
+    assert all("transferência" not in v["tipo"] for v in resultado["vizinhas"])
+
+
+def test_vizinhanca_local_carteira_base_degenerada_levanta_erro():
+    diarios = _diarios_reais()
+    with pytest.raises(ValueError, match="degenerada"):
+        vizinhanca_local({"resgat": 0, "gridhedge": 0, "romanos2": 0}, diarios, _MARGENS_POR_CONTRATO_10_8)
+
+
 # --- Robustez (Monte Carlo) do portfólio ---------------------------------
 #
 # tarefas e épicos.pdf tarefa 8.1: "Para portfólio: Todos os robôs
@@ -859,3 +1015,100 @@ def test_fronteira_pareto_vazia_para_lista_vazia():
 def test_fronteira_pareto_um_unico_resultado_sempre_esta_na_fronteira():
     resultado = {"alocacao": {"a": 1}, "lucro_total": 100.0, "mdd": -10.0}
     assert fronteira_pareto([resultado], eixo_retorno="lucro_total", eixo_risco="mdd") == [resultado]
+
+
+# --- Epsilon-Pareto (tolerância econômica) -- backlog de
+# prompts/otimizacao.pdf §8, fora dos épicos do PDF-fonte ------------------
+#
+# "A diferença entre RLT R$80.000/MDD R$14.000 e RLT R$80.200/MDD
+# R$14.100 provavelmente não é economicamente relevante" -- o documento
+# pede tolerância por eixo para tratar combinações "economicamente
+# iguais" como uma só. Tolerância é decisão de PRODUTO, não convenção
+# financeira do PDF-fonte -- perguntado ao usuário antes de implementar
+# (AGENTS.md §24): resposta foi deixar configurável ao vivo na UI, sem
+# fixar um padrão no código -- por isso `tolerancia_retorno_pct`/
+# `tolerancia_risco_pct` são parâmetros com default `0.0` (nenhuma
+# tolerância -- reproduz exatamente o comportamento anterior de
+# `fronteira_pareto`, só dedup de empates exatos), não um valor do
+# documento-fonte (1%/2%) fixado no código; a UI em `app.py` que decide
+# expor 1%/2% como valor inicial dos campos.
+#
+# Algoritmo: sobre a fronteira ESTRITA já calculada (skyline, inalterado
+# acima), varre em ordem de retorno decrescente mantendo um
+# "representante" -- um ponto cujos dois eixos estejam dentro da
+# tolerância (relativa, `abs(diferenca) / abs(valor_do_representante)`)
+# do representante ATUAL é agrupado com ele e descartado; um ponto fora
+# da tolerância em qualquer eixo vira o novo representante. Comparação
+# sempre contra o representante fixo do grupo corrente (nunca contra o
+# último ponto agrupado) -- evita "encadeamento" onde uma sequência de
+# pontos levemente distantes uns dos outros acabaria colapsando pontos
+# muito distantes entre si. Valores conferidos à mão (dados sintéticos
+# pequenos, para isolar o algoritmo de ruído de dado real).
+
+_FRONTEIRA_EPSILON_SINTETICA = [
+    {"alocacao": {"a": 1}, "lucro_total": 10000.0, "mdd": -1000.0},
+    {"alocacao": {"a": 2}, "lucro_total": 9950.0, "mdd": -980.0},   # 0.5% retorno, 2.0% risco de #1 -> agrupa
+    {"alocacao": {"a": 3}, "lucro_total": 8000.0, "mdd": -500.0},   # 20% de #1 -> não agrupa, vira representante
+    {"alocacao": {"a": 4}, "lucro_total": 5000.0, "mdd": -100.0},   # 37.5% de #3 -> não agrupa
+]
+
+
+def test_fronteira_pareto_epsilon_agrupa_pontos_proximos():
+    fronteira = fronteira_pareto(
+        _FRONTEIRA_EPSILON_SINTETICA, eixo_retorno="lucro_total", eixo_risco="mdd",
+        tolerancia_retorno_pct=1.0, tolerancia_risco_pct=2.0,
+    )
+    alocacoes = [r["alocacao"] for r in fronteira]
+    assert alocacoes == [{"a": 1}, {"a": 3}, {"a": 4}]  # {"a": 2} agrupado com {"a": 1}
+
+
+def test_fronteira_pareto_epsilon_expoe_combinacoes_agrupadas():
+    # Pedido de acompanhamento do usuário: a tabela da UI não mostrava as
+    # combinações que o agrupamento epsilon removeu -- cada representante
+    # precisa carregar QUEM foi agrupado com ele, não só desaparecer.
+    fronteira = fronteira_pareto(
+        _FRONTEIRA_EPSILON_SINTETICA, eixo_retorno="lucro_total", eixo_risco="mdd",
+        tolerancia_retorno_pct=1.0, tolerancia_risco_pct=2.0,
+    )
+    representante_1 = next(r for r in fronteira if r["alocacao"] == {"a": 1})
+    assert [ag["alocacao"] for ag in representante_1["_agrupados"]] == [{"a": 2}]
+
+    representante_3 = next(r for r in fronteira if r["alocacao"] == {"a": 3})
+    assert representante_3["_agrupados"] == []
+    representante_4 = next(r for r in fronteira if r["alocacao"] == {"a": 4})
+    assert representante_4["_agrupados"] == []
+
+
+def test_fronteira_pareto_epsilon_zero_reproduz_comportamento_exato():
+    # Default (0.0/0.0) -- nenhum agrupamento, só dedup de empates exatos
+    # (comportamento anterior a este item, preservado byte a byte).
+    fronteira_sem_tolerancia = fronteira_pareto(
+        _FRONTEIRA_EPSILON_SINTETICA, eixo_retorno="lucro_total", eixo_risco="mdd",
+    )
+    fronteira_tolerancia_zero = fronteira_pareto(
+        _FRONTEIRA_EPSILON_SINTETICA, eixo_retorno="lucro_total", eixo_risco="mdd",
+        tolerancia_retorno_pct=0.0, tolerancia_risco_pct=0.0,
+    )
+    assert fronteira_sem_tolerancia == fronteira_tolerancia_zero
+    alocacoes = [r["alocacao"] for r in fronteira_sem_tolerancia]
+    assert alocacoes == [{"a": 1}, {"a": 2}, {"a": 3}, {"a": 4}]  # todos ficam, nenhum é dominado
+
+
+def test_fronteira_pareto_epsilon_nao_agrupa_alem_do_representante_fixo():
+    # Comparação é sempre contra o representante do grupo, não contra o
+    # último ponto agrupado -- evita encadeamento.
+    pontos = [
+        {"alocacao": {"a": 1}, "lucro_total": 100.0, "mdd": -10.0},
+        {"alocacao": {"a": 2}, "lucro_total": 99.0, "mdd": -9.9},   # 1% de #1 -> agrupa com #1
+        {"alocacao": {"a": 3}, "lucro_total": 98.01, "mdd": -9.801},  # ~1% de #2, mas ~2% de #1 -> NÃO agrupa (representante é #1)
+    ]
+    fronteira = fronteira_pareto(
+        pontos, eixo_retorno="lucro_total", eixo_risco="mdd",
+        tolerancia_retorno_pct=1.0, tolerancia_risco_pct=1.0,
+    )
+    alocacoes = [r["alocacao"] for r in fronteira]
+    assert alocacoes == [{"a": 1}, {"a": 3}]
+
+
+def test_fronteira_pareto_epsilon_lista_vazia():
+    assert fronteira_pareto([], eixo_retorno="lucro_total", eixo_risco="mdd", tolerancia_retorno_pct=1.0) == []

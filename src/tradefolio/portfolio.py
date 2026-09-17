@@ -639,6 +639,64 @@ def buscar_combinacoes_portfolio(
     return resultados
 
 
+def _sincronizar_alocacao(
+    alocacao: dict, diarios_referencia: dict, margens_por_contrato: dict, usar_janela_comum: bool,
+) -> tuple:
+    """Monta `largo`/`margens_ativas` para UMA alocação -- mesma lógica
+    por-combinação usada por `buscar_combinacoes_portfolio` (extraída
+    aqui para `buscar_combinacoes_portfolio_com_filtros`/
+    `vizinhanca_local` compartilharem, sem duplicar uma terceira vez; a
+    função ORIGINAL `buscar_combinacoes_portfolio` permanece intocada,
+    pedido explícito do usuário). Retorna `(None, None)` se a alocação é
+    degenerada (todos os robôs em 0 contratos) ou se `usar_janela_comum`
+    deixaria a janela comum vazia -- os dois casos silenciosos que
+    `buscar_combinacoes_portfolio` já pulava sem contar."""
+    diarios_ativos, margens_ativas = {}, {}
+    for nome, n_contratos in alocacao.items():
+        if n_contratos == 0:
+            continue
+        diario = diarios_referencia[nome]
+        diario_simulado = diario.copy()
+        diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos
+        diarios_ativos[nome] = diario_simulado
+        margens_ativas[nome] = margens_por_contrato[nome] * n_contratos
+
+    if not diarios_ativos:
+        return None, None
+
+    largo = sincronizar_portfolio(diarios_ativos)
+    if usar_janela_comum:
+        try:
+            largo = restringir_janela_comum(largo)
+        except ValueError:
+            return None, None
+    return largo, margens_ativas
+
+
+def _metricas_de_alocacao(
+    alocacao: dict, largo: pd.DataFrame, margens_ativas: dict,
+    percentil_cauda: int, fracao_reserva_operacional: float, increment: float,
+) -> dict:
+    """Métricas CARAS para uma alocação já sincronizada (`largo` de
+    `_sincronizar_alocacao`) -- mesmo formato de resultado de
+    `buscar_combinacoes_portfolio`."""
+    agregadas = metricas_agregadas(largo)
+    limiar = limiar_agregado_portfolio(
+        largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
+    )
+    limiar_ativo = limiar.get("limiar_recomendado", limiar["limiar_bruto"])
+    rlt = rlt_e_risco_portfolio(largo, limiar=limiar_ativo)
+    return {
+        "alocacao": alocacao,
+        "lucro_total": agregadas["lucro_total"],
+        "mdd": agregadas["mdd"],
+        "es_95": agregadas["es_95"],
+        "limiar_ativo": limiar_ativo,
+        "rlt_acumulado": rlt["rlt_acumulado"],
+        "mdd_sobre_limiar": rlt["mdd_sobre_limiar"],
+    }
+
+
 def buscar_combinacoes_portfolio_com_filtros(
     diarios_referencia: dict,
     margens_por_contrato: dict,
@@ -745,25 +803,11 @@ def buscar_combinacoes_portfolio_com_filtros(
             n_puladas_sobrevivencia += 1
             continue
 
-        diarios_ativos, margens_ativas = {}, {}
-        for nome, n_contratos in alocacao.items():
-            if n_contratos == 0:
-                continue
-            diario = diarios_referencia[nome]
-            diario_simulado = diario.copy()
-            diario_simulado["liquido"] = diario["liquido_por_contrato"] * n_contratos
-            diarios_ativos[nome] = diario_simulado
-            margens_ativas[nome] = margens_por_contrato[nome] * n_contratos
-
-        if not diarios_ativos:
+        largo, margens_ativas = _sincronizar_alocacao(
+            alocacao, diarios_referencia, margens_por_contrato, usar_janela_comum,
+        )
+        if largo is None:
             continue
-
-        largo = sincronizar_portfolio(diarios_ativos)
-        if usar_janela_comum:
-            try:
-                largo = restringir_janela_comum(largo)
-            except ValueError:
-                continue
 
         if perda_diaria_maxima is not None:
             combinada = serie_combinada(largo)
@@ -771,22 +815,9 @@ def buscar_combinacoes_portfolio_com_filtros(
                 n_puladas_perda_diaria += 1
                 continue
 
-        agregadas = metricas_agregadas(largo)
-        limiar = limiar_agregado_portfolio(
-            largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
-        )
-        limiar_ativo = limiar.get("limiar_recomendado", limiar["limiar_bruto"])
-        rlt = rlt_e_risco_portfolio(largo, limiar=limiar_ativo)
-
-        resultados.append({
-            "alocacao": alocacao,
-            "lucro_total": agregadas["lucro_total"],
-            "mdd": agregadas["mdd"],
-            "es_95": agregadas["es_95"],
-            "limiar_ativo": limiar_ativo,
-            "rlt_acumulado": rlt["rlt_acumulado"],
-            "mdd_sobre_limiar": rlt["mdd_sobre_limiar"],
-        })
+        resultados.append(_metricas_de_alocacao(
+            alocacao, largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
+        ))
 
     return {
         "resultados": resultados,
@@ -894,7 +925,137 @@ def otimizar_portfolio(
     return selecionar_melhores_combinacoes(resultados, objetivo, limite_mdd, top_n)
 
 
-def fronteira_pareto(resultados: list, eixo_retorno: str, eixo_risco: str) -> list:
+def curva_limiares_mdd(resultados: list[dict], limites_mdd: list[float]) -> list[dict]:
+    """Backlog de `prompts/otimizacao.pdf` §7: em vez de pedir ao usuário
+    um único MDD máximo, gera uma curva com vários limiares e, "para
+    cada limiar, retorna somente a carteira de maior RLT". Opera sobre
+    `resultados` já calculados (por `buscar_combinacoes_portfolio` OU
+    `buscar_combinacoes_portfolio_com_filtros(...)["resultados"]` --
+    qualquer `list[dict]` no formato já usado por `selecionar_melhores_
+    combinacoes`/`fronteira_pareto`), nenhuma busca nova.
+
+    Distinto do objetivo já existente "maximizar_lucro_com_limite_mdd"
+    (`selecionar_melhores_combinacoes`), que maximiza LUCRO sob a mesma
+    restrição de MDD -- RLT e lucro bruto são objetivos diferentes, por
+    isso esta função tem sua própria lógica de seleção (filtra por MDD,
+    ordena por `rlt_acumulado`) em vez de reusar aquele objetivo com um
+    nome enganoso.
+
+    Retorna uma linha por limiar, NA MESMA ORDEM de `limites_mdd`:
+    `{"limite_mdd": limite, "n_combinacoes_validas": N, "melhor": dict|None}`.
+    `melhor` é `None` (nunca um erro) quando nenhuma combinação em
+    `resultados` satisfaz aquele limiar -- um limiar sem candidato válido
+    e uma lista de resultados vazia são coisas diferentes, nunca
+    confundidas silenciosamente."""
+    curva = []
+    for limite in limites_mdd:
+        validos = [r for r in resultados if r["mdd"] >= limite]
+        melhor = max(validos, key=lambda r: r["rlt_acumulado"]) if validos else None
+        curva.append({
+            "limite_mdd": limite,
+            "n_combinacoes_validas": len(validos),
+            "melhor": melhor,
+        })
+    return curva
+
+
+def vizinhanca_local(
+    alocacao_base: dict,
+    diarios_referencia: dict,
+    margens_por_contrato: dict,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = None,
+    usar_janela_comum: bool = True,
+    incluir_transferencias: bool = True,
+) -> dict:
+    """Backlog de `prompts/otimizacao.pdf` §9 ("Robustez local para
+    contratos inteiros"): para uma carteira já escolhida, testa vizinhas
+    a ±1 contrato POR ROBÔ (uma coordenada por vez) e, opcionalmente
+    (`incluir_transferencias=True`, padrão), uma transferência de 1
+    contrato entre cada PAR ORDENADO de robôs (-1 num, +1 noutro) --
+    mesma ideia do documento-fonte ("teste vizinhas... também teste
+    transferências"). Ele mesmo não classifica "platô robusto" vs. "pico
+    isolado" -- isso depende de uma tolerância que é decisão de produto
+    (ver epsilon-Pareto, backlog), não uma convenção do PDF-fonte; quem
+    consome decide o que "boa o suficiente" significa. A leitura
+    pretendida (documento-fonte): "se a carteira é excelente mas todas as
+    vizinhas são ruins, ela provavelmente explora uma coincidência
+    histórica; se a carteira e as vizinhas são boas, é um platô robusto."
+
+    Contratos negativos nunca são gerados (mínimo 0 -- equivalente a
+    excluir aquele robô, candidato válido no resto do módulo). Vizinhas
+    degeneradas (todos os robôs em 0) ou cuja janela comum ficaria vazia
+    (`usar_janela_comum=True`) são omitidas do resultado, não inventadas
+    como zero -- mesma convenção de `buscar_combinacoes_portfolio`.
+
+    Reusa `_sincronizar_alocacao`/`_metricas_de_alocacao` (extraídas de
+    `buscar_combinacoes_portfolio_com_filtros` para as duas funções
+    novas compartilharem, sem duplicar o pipeline uma terceira vez) --
+    a função ORIGINAL `buscar_combinacoes_portfolio` permanece intocada
+    (pedido explícito do usuário).
+
+    Retorna `{"base": dict, "vizinhas": list[dict]}` -- cada entrada tem
+    o mesmo formato de `buscar_combinacoes_portfolio` mais `"tipo"`
+    (`"±1 <nome>"` ou `"transferência <de> -> <para>"`) identificando QUAL
+    perturbação gerou aquela vizinha; as duas direções (-1/+1) do mesmo
+    `"±1 <nome>"` compartilham o rótulo -- a direção já está implícita na
+    própria `alocacao` de cada entrada.
+
+    Levanta `ValueError` se a própria carteira base for degenerada (0
+    contratos em todos os robôs) ou não tiver janela comum -- não há o
+    que testar vizinhança de uma base que nem existe."""
+    nomes = list(alocacao_base.keys())
+
+    candidatos = []
+    for nome in nomes:
+        for delta in (-1, 1):
+            novo_n = alocacao_base[nome] + delta
+            if novo_n < 0:
+                continue
+            vizinha = dict(alocacao_base)
+            vizinha[nome] = novo_n
+            candidatos.append((f"±1 {nome}", vizinha))
+
+    if incluir_transferencias:
+        for de, para in itertools.permutations(nomes, 2):
+            if alocacao_base[de] <= 0:
+                continue
+            vizinha = dict(alocacao_base)
+            vizinha[de] -= 1
+            vizinha[para] += 1
+            candidatos.append((f"transferência {de} -> {para}", vizinha))
+
+    def _avaliar(alocacao: dict) -> dict:
+        largo, margens_ativas = _sincronizar_alocacao(
+            alocacao, diarios_referencia, margens_por_contrato, usar_janela_comum,
+        )
+        if largo is None:
+            return None
+        return _metricas_de_alocacao(
+            alocacao, largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
+        )
+
+    base_resultado = _avaliar(alocacao_base)
+    if base_resultado is None:
+        raise ValueError(
+            "A carteira base é degenerada (0 contratos em todos os robôs) ou não tem janela comum"
+        )
+
+    vizinhas = []
+    for tipo, alocacao in candidatos:
+        resultado = _avaliar(alocacao)
+        if resultado is None:
+            continue
+        vizinhas.append({**resultado, "tipo": tipo})
+
+    return {"base": base_resultado, "vizinhas": vizinhas}
+
+
+def fronteira_pareto(
+    resultados: list, eixo_retorno: str, eixo_risco: str,
+    tolerancia_retorno_pct: float = 0.0, tolerancia_risco_pct: float = 0.0,
+) -> list:
     """Fronteira de Pareto DISCRETA (pedido de acompanhamento do usuário,
     fora dos épicos do PDF-fonte) sobre combinações já calculadas por
     `buscar_combinacoes_portfolio` -- nenhuma busca nova, só um
@@ -927,7 +1088,47 @@ def fronteira_pareto(resultados: list, eixo_retorno: str, eixo_risco: str) -> li
     combinações. Combinações com valores IDÊNTICOS nos dois eixos contam
     como uma só (a primeira encontrada representa as demais -- duplicatas
     exatas não são mais "não-dominadas" entre si do que uma cópia de si
-    mesma, e listar todas adicionaria ruído sem informação nova)."""
+    mesma, e listar todas adicionaria ruído sem informação nova).
+
+    Epsilon-Pareto (backlog de `prompts/otimizacao.pdf` §8, fora dos
+    épicos do PDF-fonte): `tolerancia_retorno_pct`/`tolerancia_risco_pct`
+    tratam combinações "economicamente iguais" (dentro de X% uma da
+    outra nos dois eixos) como uma só, além dos empates exatos já
+    tratados acima -- documento-fonte: "a diferença entre RLT R$80.000/
+    MDD R$14.000 e RLT R$80.200/MDD R$14.100 provavelmente não é
+    economicamente relevante". Tolerância é decisão de PRODUTO, não
+    convenção financeira -- perguntado ao usuário antes de implementar
+    (AGENTS.md §24); resposta foi deixar configurável ao vivo na UI, por
+    isso o DEFAULT aqui é `0.0`/`0.0` (nenhuma tolerância, reproduz
+    EXATAMENTE o comportamento anterior a este item -- só dedup de
+    empates exatos), não o 1%/2% do exemplo do documento (que vira o
+    valor inicial dos campos em `app.py`, não um padrão fixado no
+    código).
+
+    Algoritmo: sobre a fronteira ESTRITA já calculada acima (mesma ordem
+    de retorno decrescente), mantém um "representante" -- um ponto cujos
+    dois eixos estão dentro da tolerância (relativa,
+    `abs(diferença) / abs(valor do representante)`, `<=` inclusive) do
+    representante ATUAL é agrupado com ele e descartado; um ponto fora da
+    tolerância em qualquer eixo vira o novo representante. Comparação
+    SEMPRE contra o representante fixo do grupo corrente, nunca contra o
+    último ponto agrupado -- evita "encadeamento" (uma sequência de
+    pontos levemente distantes uns dos outros colapsando pontos muito
+    distantes entre si). Quando o valor do representante num eixo é
+    exatamente `0`, só um ponto também exatamente `0` naquele eixo conta
+    como "dentro da tolerância" (divisão por zero evitada sem inventar
+    uma regra de proximidade absoluta não pedida).
+
+    Cada representante retornado carrega `"_agrupados"`: a lista das
+    combinações (mesmo formato de resultado) que foram absorvidas nele --
+    pedido de acompanhamento do usuário, para a UI não simplesmente
+    esconder o que o agrupamento removeu. Vazia (`[]`) quando nada foi
+    agrupado com aquele representante. Só aparece quando alguma
+    tolerância é `> 0` -- com `0.0`/`0.0` (default) a função retorna os
+    MESMOS objetos de `resultados`, sem essa chave, preservando
+    compatibilidade byte a byte com o comportamento anterior a este
+    item (`fronteira_pareto([resultado], ...) == [resultado]` continua
+    válido)."""
     if not resultados:
         return []
     ordenados = sorted(resultados, key=lambda r: (r[eixo_retorno], r[eixo_risco]), reverse=True)
@@ -937,4 +1138,24 @@ def fronteira_pareto(resultados: list, eixo_retorno: str, eixo_risco: str) -> li
         if r[eixo_risco] > melhor_risco_ate_agora:
             fronteira.append(r)
             melhor_risco_ate_agora = r[eixo_risco]
-    return fronteira
+
+    if tolerancia_retorno_pct <= 0.0 and tolerancia_risco_pct <= 0.0:
+        return fronteira
+
+    def _dentro_da_tolerancia(valor: float, referencia: float, tolerancia_pct: float) -> bool:
+        if referencia == 0:
+            return valor == 0
+        return abs(valor - referencia) / abs(referencia) <= tolerancia_pct / 100
+
+    agrupada = [dict(fronteira[0], _agrupados=[])]
+    representante = fronteira[0]
+    for r in fronteira[1:]:
+        if (
+            _dentro_da_tolerancia(r[eixo_retorno], representante[eixo_retorno], tolerancia_retorno_pct)
+            and _dentro_da_tolerancia(r[eixo_risco], representante[eixo_risco], tolerancia_risco_pct)
+        ):
+            agrupada[-1]["_agrupados"].append(r)
+            continue
+        agrupada.append(dict(r, _agrupados=[]))
+        representante = r
+    return agrupada

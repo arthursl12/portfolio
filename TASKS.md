@@ -1488,19 +1488,46 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   tocar `selecionar_melhores_combinacoes`/`otimizar_portfolio`.
 
 ### Curva de limiares (em vez de um único MDD-alvo)
-- [ ] Rodar a busca para vários "MDD máximo aceitável" (ex. R$2.500/
-  5.000/7.500/10.000) e devolver só a carteira de maior RLT de cada --
-  hoje o objetivo `maximizar_lucro_com_limite_mdd` já faz isso para UM
-  `limite_mdd` por chamada; o item novo é gerar a curva inteira (uma
-  chamada por limiar) e apresentar como tabela/gráfico único.
+- [x] `portfolio.curva_limiares_mdd(resultados, limites_mdd)` -- para
+  cada limiar em `limites_mdd`, filtra `resultados` (de
+  `buscar_combinacoes_portfolio` OU `..._com_filtros(...)["resultados"]`,
+  qualquer `list[dict]` no formato já usado por `selecionar_melhores_
+  combinacoes`/`fronteira_pareto`) pelas combinações cujo MDD não é pior
+  que o limiar, e devolve a de maior `rlt_acumulado` entre elas
+  (documento-fonte §7: "para cada limiar, retorne somente a carteira de
+  maior RLT"). Distinto do objetivo já existente
+  `maximizar_lucro_com_limite_mdd` (que otimiza LUCRO sob a mesma
+  restrição) -- RLT e lucro bruto são objetivos diferentes, mantidos
+  como funções separadas em vez de reusar um objetivo com um nome
+  enganoso. `melhor=None` (nunca erro) quando nenhuma combinação
+  satisfaz aquele limiar. Wireado em `app.py` dentro do expander
+  "Otimização de portfólio (busca discreta)", logo abaixo da Fronteira
+  de Pareto -- verificado via `AppTest` com limiares reais
+  (-2.500/-5.000/-7.500/-10.000 sobre resgat+gridhedge+romanos2: RLT
+  sobe de 4,3575 a 4,8043 conforme o limiar afrouxa, estabilizando em
+  -7.500/-10.000 -- mesma carteira vencedora nos dois).
 
 ### Robustez local para contratos inteiros (vizinhança ±1)
-- [ ] Para a(s) carteira(s) finalista(s): testar vizinhas a ±1 contrato
-  por robô e transferências de 1 contrato entre dois robôs, comparando
-  a métrica-alvo. "Platô robusto" (vizinhas também boas) vs. "pico
-  isolado" (só a carteira exata é boa) -- não implementado; não depende
-  de nenhuma decisão financeira nova, só itera `buscar_combinacoes_portfolio`
-  numa vizinhança pequena da carteira já escolhida.
+- [x] `portfolio.vizinhanca_local(alocacao_base, diarios_referencia,
+  margens_por_contrato, ...)` -- para uma carteira-base, testa vizinhas
+  a ±1 contrato POR ROBÔ (uma coordenada por vez, nunca negativo) e,
+  por padrão (`incluir_transferencias=True`), uma transferência de 1
+  contrato entre cada PAR ORDENADO de robôs. Não classifica "platô
+  robusto" vs. "pico isolado" automaticamente (tolerância é decisão de
+  produto, ver epsilon-Pareto abaixo) -- só calcula base + vizinhas lado
+  a lado, mesmo formato de `buscar_combinacoes_portfolio` mais um campo
+  `tipo`. Refatoração de suporte: `_sincronizar_alocacao`/
+  `_metricas_de_alocacao` extraídas de dentro de
+  `buscar_combinacoes_portfolio_com_filtros` (a função que EU escrevi
+  nesta rodada) para as duas funções novas compartilharem o pipeline
+  por-alocação sem uma terceira cópia -- a função ORIGINAL
+  `buscar_combinacoes_portfolio` permanece intocada, pedido explícito do
+  usuário. Verificado por script + 6 testes (12 vizinhas para uma base
+  de 3 robôs: 6 de ±1 + 6 de transferência; valores conferidos contra
+  `buscar_combinacoes_portfolio` chamada com um único candidato por
+  vizinha). Wireado em `app.py` como expander próprio "Robustez local
+  (vizinhança ±1 contrato)", com a base pré-preenchida pelo número de
+  contratos já configurado de cada robô -- verificado via `AppTest`.
 
 ### Monte Carlo em duas fases + esquemas adicionais
 - [ ] Restringir Monte Carlo (`robustez_portfolio`) aos ~10-20 finalistas
@@ -1525,13 +1552,46 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   de estouro de limiar/margem, mas não CDaR nem P(recuperar) explícitos).
 
 ### Epsilon-Pareto (tolerância econômica) e agrupamento
-- [ ] `fronteira_pareto` hoje só deduplica EMPATES EXATOS nos dois eixos
-  -- o documento pede tolerância (ex. 1% em RLT, 2% em MDD) para tratar
-  combinações "economicamente iguais" como uma só, e agrupar pontos
-  próximos apresentando um representante por região. As tolerâncias são
-  uma escolha de produto (não uma convenção financeira do PDF-fonte) --
-  perguntar ao usuário os valores antes de implementar, não inventar
-  1%/2% como padrão silencioso.
+- [x] `fronteira_pareto(..., tolerancia_retorno_pct=0.0, tolerancia_risco_pct=0.0)`
+  -- **perguntado ao usuário antes de implementar** (AGENTS.md §24):
+  resposta foi deixar as tolerâncias configuráveis AO VIVO na UI, não
+  fixar um valor no código. Por isso o default no código é `0.0`/`0.0`
+  (nenhuma tolerância -- reproduz EXATAMENTE o comportamento anterior a
+  este item, só dedup de empates exatos, backward-compatible com os
+  testes já existentes); `app.py` inicializa os campos com 1%/2% (o
+  exemplo do documento-fonte), ajustáveis livremente pelo usuário nos
+  dois expanders de otimização (busca original e busca com filtros).
+  Algoritmo: sobre a fronteira estrita já calculada, mantém um
+  "representante" -- um ponto dentro da tolerância relativa
+  (`abs(diferença)/abs(valor do representante)`, inclusive) do
+  representante ATUAL é agrupado e descartado; comparação sempre contra
+  o representante FIXO do grupo (nunca o último ponto agrupado), para
+  não encadear pontos levemente distantes uns dos outros até colapsar
+  pontos muito distantes entre si. Verificado com dados sintéticos (5
+  testes: agrupamento de fato acontece, tolerância 0 reproduz o
+  comportamento antigo byte a byte, o teste específico de
+  não-encadeamento, e a exposição de `_agrupados`) e via `AppTest`
+  contra dados reais (728 combinações reais: fronteira cai de 38 para 33
+  pontos ao subir a tolerância de 0% para 5%, ao vivo, sem recalcular a
+  busca).
+- [x] "Agrupar pontos próximos apresentando um representante por região"
+  -- pedido de acompanhamento do usuário: a tabela da fronteira não
+  mostrava as combinações que o agrupamento epsilon havia absorvido,
+  elas simplesmente desapareciam. Cada representante em `fronteira_pareto`
+  agora carrega `_agrupados` (lista das combinações absorvidas, vazia
+  quando nada foi agrupado); `app.py` usa isso para uma coluna
+  "Combinações agrupadas (epsilon)" na tabela principal E um expander
+  "Ver as N combinações agrupadas..." com o detalhamento completo
+  (representante -> cada combinação que ele absorveu), nas duas seções
+  de Pareto (busca original e busca com filtros -- esta última também
+  ganhou sua própria tabela de fronteira, que só tinha o gráfico até
+  agora). Verificado via `AppTest`: com tolerância 5%/5% sobre 728
+  combinações reais, 5 combinações aparecem no detalhamento, cada uma
+  com seu representante correto.
+- [ ] Ainda não implementado: "remover composições proporcionalmente
+  equivalentes" -- isso já é o item de dedupe de composição/escala acima
+  (`buscar_combinacoes_portfolio_com_filtros`), aplicado à GRADE de
+  busca, não à fronteira em si -- redundante implementar de novo aqui.
 
 ### Aproximação inteira da composição-alvo + escolha de escala total
 - [ ] Dada uma composição-alvo em % (ex. de uma otimização contínua
