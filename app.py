@@ -69,6 +69,12 @@ from tradefolio.portfolio import (
     sincronizar_portfolio,
     vizinhanca_local,
 )
+from tradefolio.portfolio_builder import (
+    cenario_degradacao_finalista,
+    montar_cartao_ea,
+    orcamento_de_risco,
+    plano_operacional,
+)
 from tradefolio.report_data import (
     JANELAS_DISPONIVEIS,
     calcular_pagina1,
@@ -1525,16 +1531,699 @@ def rodar_modo_portfolio():
     )
 
 
+# ==========================================================================
+# Portfolio Builder -- fluxo guiado de decisão (backlog de
+# prompts/portfolioBuilder.pdf, fora dos épicos do PDF-fonte).
+#
+# Distinto do modo Portfólio acima ("Lab" -- métricas completas,
+# controles avançados, responde "o que consigo descobrir?"): o Builder
+# responde "que carteira devo considerar?", coleta decisões
+# progressivamente e mostra só a conclusão necessária em cada etapa. A
+# metodologia completa continua acessível (nada é escondido de quem
+# quer auditar), só não é o padrão exibido -- cada função em
+# tradefolio.portfolio_builder documenta exatamente quais primitivas já
+# existentes ela reusa, nenhuma fórmula nova.
+#
+# Carregamento de robôs é reimplementado aqui (não reusa o loop de
+# rodar_modo_portfolio) -- aquele loop está fortemente acoplado a
+# widgets exclusivos do Lab (editor de custo mensal por faixa, número
+# de contratos simulado) que o Builder não precisa nesta etapa do
+# fluxo; reusa as MESMAS primitivas de carregamento (carregar_ordens/
+# eh_formato_resultados_diarios/detectar_contratos_referencia), só numa
+# orquestração de UI mais simples.
+# ==========================================================================
+
+
+def _builder_carregar_diarios_referencia(arquivos: list) -> dict:
+    """Carrega `{nome_robo: diario}` na escala de referência a partir dos
+    arquivos escolhidos -- mesmas primitivas de carregamento/detecção de
+    contratos_referencia já usadas em `rodar_modo_portfolio`, sem os
+    widgets de contratos/custo mensal (o Builder não precisa deles nesta
+    etapa)."""
+    diarios_referencia = {}
+    for arquivo in arquivos:
+        nome_arquivo = getattr(arquivo, "name", str(arquivo))
+        nome_robo = Path(nome_arquivo).stem
+
+        if eh_formato_resultados_diarios(arquivo):
+            try:
+                resultados = carregar_resultados_diarios(arquivo)
+                diario = montar_diario_resultados(resultados)
+            except ValueError as erro:
+                st.error(f"{nome_robo}: CSV de resultados diários inválido: {erro}")
+                continue
+        else:
+            try:
+                ordens = carregar_ordens(arquivo)
+            except ValueError as erro:
+                st.error(f"{nome_robo}: CSV inválido: {erro}")
+                continue
+            try:
+                contratos_referencia = detectar_contratos_referencia(ordens)
+            except ValueError:
+                try:
+                    contratos_referencia = detectar_contratos_referencia_multi_ativo(ordens, dias_recentes=90)
+                except ValueError as erro:
+                    st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
+                    continue
+            diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
+
+        diarios_referencia[nome_robo] = diario
+    return diarios_referencia
+
+
+def _builder_selecionar_arquivos_sidebar() -> list:
+    """Widgets de seleção de arquivo, renderizados em TODO passo do
+    Builder (não só no Passo 1) -- Streamlit limpa o `session_state` de
+    um widget com `key` quando ele deixa de ser instanciado numa
+    execução (comportamento documentado do próprio Streamlit, não um
+    bug daqui); se esses widgets só existissem dentro da função do
+    Passo 1, voltar do Passo 2 para o Passo 1 apagaria os EAs já
+    escolhidos. Mantê-los sempre montados evita isso."""
+    with st.sidebar:
+        st.header("EAs candidatos")
+        fonte = st.radio(
+            "Fonte dos CSVs", ["Robôs de exemplo", "Enviar CSVs"], key="builder_fonte",
+        )
+        if fonte == "Enviar CSVs":
+            arquivos = st.file_uploader(
+                "CSVs (formato Smarttbot ou resultado diário)", type="csv", accept_multiple_files=True,
+                key="builder_upload",
+            ) or []
+        else:
+            exemplos = sorted(DADOS_EXEMPLO_DIR.glob("*.csv"))
+            arquivos = st.multiselect(
+                "Robôs", exemplos, format_func=lambda p: p.stem, key="builder_exemplos",
+            )
+    return arquivos
+
+
+def _builder_passo1_selecionar_eas(arquivos: list):
+    st.subheader("Passo 1 -- Selecionar os EAs candidatos")
+    st.caption(
+        "Escolha quais robôs podem participar. Para cada um, um cartão curto -- não Monte Carlo "
+        "ainda, isso vem só no Passo 6, depois de uma carteira escolhida."
+    )
+
+    if not arquivos:
+        st.info("Escolha ao menos 2 EAs candidatos na barra lateral.")
+        return
+
+    diarios_referencia = _builder_carregar_diarios_referencia(arquivos)
+    st.session_state["builder_diarios_referencia"] = diarios_referencia
+
+    decisoes = st.session_state.setdefault("builder_decisoes", {})
+    margens = st.session_state.setdefault("builder_margens_por_contrato", {})
+
+    for nome, diario in diarios_referencia.items():
+        margem = margens.get(nome)
+        cartao = montar_cartao_ea(diario, margem_por_contrato=margem)
+
+        with st.container(border=True):
+            st.markdown(f"**{nome}**")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Histórico", f"{cartao['pregoes']} pregões")
+            col2.metric("MDD/contrato", fmt(cartao["mdd_por_contrato"], moeda=True))
+            col3.metric("Pior dia/contrato", fmt(cartao["pior_dia_por_contrato"], moeda=True))
+            col4.metric("Recuperação máx.", f"{cartao['tempo_max_recuperacao']} pregões")
+            col5, col6 = st.columns(2)
+            col5.metric("Dependência 5 melhores dias", fmt(cartao["dependencia_5_melhores_dias_pct"]) + "%")
+            margens[nome] = col6.number_input(
+                "Margem/contrato (R$, para RLT)", min_value=0.0, value=margem, step=100.0,
+                key=f"builder_margem::{nome}",
+            )
+            if margens[nome]:
+                cartao_com_margem = montar_cartao_ea(diario, margem_por_contrato=margens[nome])
+                st.caption(f"RLT/contrato: {fmt(cartao_com_margem['rlt_por_contrato'], 4)}")
+
+            if cartao["alerta_historico_curto"]:
+                st.warning(f"Histórico curto ({cartao['meses_historico']:.1f} meses).")
+
+            opcoes_decisao = ["Incluir", "Excluir", "Candidato secundário"]
+            decisoes[nome] = st.radio(
+                "Decisão", opcoes_decisao, horizontal=True,
+                index=opcoes_decisao.index(decisoes.get(nome, "Incluir")),
+                key=f"builder_decisao::{nome}",
+            )
+
+    incluidos = [nome for nome, d in decisoes.items() if d == "Incluir" and nome in diarios_referencia]
+    if len(incluidos) >= 2:
+        largo_incluidos = sincronizar_portfolio({n: diarios_referencia[n] for n in incluidos})
+        corr = correlacao_portfolio(largo_incluidos.dropna())
+        clusters = clusters_de_risco(largo_incluidos.dropna())
+        pares_correlacionados = [
+            (a, b) for i, a in enumerate(incluidos) for b in incluidos[i + 1:]
+            if corr.loc[a, b] >= 0.5
+        ]
+        if pares_correlacionados:
+            for a, b in pares_correlacionados:
+                st.caption(f"⚠️ {a} e {b} estão correlacionados (correlação {corr.loc[a, b]:.2f}).")
+        clusters_multiplos = [c for c in clusters if len(c) > 1]
+        if not clusters_multiplos:
+            st.caption("Diversificação estratégica: nenhum cluster de redundância detectado.")
+
+    st.session_state["builder_incluidos"] = incluidos
+    if st.button("Avançar para o Passo 2", disabled=len(incluidos) < 2, icon=":material/arrow_forward:"):
+        st.session_state["builder_step"] = 2
+        st.rerun()
+    if len(incluidos) < 2:
+        st.info("Marque \"Incluir\" em pelo menos 2 EAs para avançar.")
+
+
+def _builder_passo2_orcamento_de_risco():
+    st.subheader("Passo 2 -- Definir o orçamento de risco")
+    st.caption("Qual é a perda máxima que este portfólio pode gerar antes de comprometer seu plano?")
+
+    diarios_referencia = st.session_state.get("builder_diarios_referencia", {})
+    margens = st.session_state.get("builder_margens_por_contrato", {})
+    incluidos = st.session_state.get("builder_incluidos", [])
+    diarios_incluidos = {n: diarios_referencia[n] for n in incluidos}
+    margens_incluidos = {n: margens.get(n) for n in incluidos}
+
+    col1, col2 = st.columns(2)
+    capital_reservado = col1.number_input(
+        "Capital reservado (R$)", min_value=0.0, value=40000.0, step=1000.0, key="builder_capital_reservado",
+    )
+    perda_maxima_aceitavel = col2.number_input(
+        "Perda máxima absoluta aceitável (R$)", min_value=0.0, value=15000.0, step=500.0,
+        key="builder_perda_maxima",
+    )
+    col3, col4 = st.columns(2)
+    margem_seguranca_pct = col3.number_input(
+        "Margem de segurança desejada (%)", min_value=0.0, max_value=100.0, value=30.0, step=5.0,
+        key="builder_margem_seguranca",
+    )
+    horizonte_minimo_meses = col4.number_input(
+        "Horizonte mínimo de avaliação (meses)", min_value=1, value=6, step=1,
+        key="builder_horizonte_minimo",
+    )
+
+    mdd_historico_referencia = None
+    limiar_referencia = None
+    if all(margens_incluidos.get(n) for n in incluidos):
+        largo_ref = restringir_janela_comum(sincronizar_portfolio(diarios_incluidos))
+        mdd_historico_referencia = metricas_agregadas(largo_ref)["mdd"]
+        limiar_ref = limiar_agregado_portfolio(largo_ref, margens_incluidos)
+        limiar_referencia = limiar_ref.get("limiar_recomendado", limiar_ref["limiar_bruto"])
+    else:
+        st.caption(
+            "Informe a margem/contrato de cada EA no Passo 1 para comparar seu orçamento contra "
+            "o que a história de uma carteira mínima (1 contrato de cada) exigiria."
+        )
+
+    orcamento = orcamento_de_risco(
+        capital_reservado, perda_maxima_aceitavel, margem_seguranca_pct,
+        mdd_historico_referencia=mdd_historico_referencia, limiar_referencia=limiar_referencia,
+    )
+    # capital_reservado/perda_maxima_aceitavel guardados dentro do dict
+    # (chave PLANA, não ligada a widget) -- os widgets deste passo somem
+    # do script quando o usuário está em outro passo, e Streamlit limpa
+    # o session_state de um widget que não foi instanciado numa
+    # execução (mesmo comportamento já corrigido no Passo 1 para os
+    # arquivos selecionados). Ler direto de `st.session_state["builder_
+    # capital_reservado"]` (a chave do widget) em outro passo voltaria
+    # `None`/o valor sumiria.
+    orcamento["capital_reservado"] = capital_reservado
+    orcamento["perda_maxima_aceitavel"] = perda_maxima_aceitavel
+    st.session_state["builder_orcamento"] = orcamento
+    st.session_state["builder_horizonte_minimo_meses"] = horizonte_minimo_meses
+
+    st.metric("MDD de projeto", fmt(orcamento["mdd_projeto"], moeda=True))
+    st.caption(
+        f"Seu limite pessoal é {fmt(perda_maxima_aceitavel, moeda=True)}. Para não dimensionar "
+        f"exatamente no limite, o portfólio será construído para um drawdown de projeto de até "
+        f"{fmt(orcamento['mdd_projeto'], moeda=True)}."
+    )
+    if orcamento["abaixo_do_historico"]:
+        st.warning(
+            f"Mesmo uma carteira mínima (1 contrato de cada EA incluído) já teve um MDD histórico de "
+            f"{fmt(mdd_historico_referencia, moeda=True)} -- acima do seu MDD de projeto. Considere "
+            "revisar o orçamento ou os EAs escolhidos."
+        )
+    if orcamento["capital_insuficiente"]:
+        st.warning(
+            f"O capital reservado ({fmt(capital_reservado, moeda=True)}) é menor que o limiar de "
+            f"capital que o modelo já existente calcula para uma carteira mínima "
+            f"({fmt(limiar_referencia, moeda=True)})."
+        )
+
+    colnav1, colnav2 = st.columns(2)
+    if colnav1.button("Voltar", icon=":material/arrow_back:"):
+        st.session_state["builder_step"] = 1
+        st.rerun()
+    if colnav2.button("Avançar", icon=":material/arrow_forward:"):
+        st.session_state["builder_step"] = 3
+        st.rerun()
+
+
+def _builder_passo3_concentracao():
+    st.subheader("Passo 3 -- Eliminar concentrações óbvias")
+    st.caption("Definir o que o otimizador NÃO pode fazer.")
+
+    diarios_referencia = st.session_state.get("builder_diarios_referencia", {})
+    incluidos = st.session_state.get("builder_incluidos", [])
+    diarios_incluidos = {n: diarios_referencia[n] for n in incluidos}
+    largo = restringir_janela_comum(sincronizar_portfolio(diarios_incluidos))
+
+    corr = correlacao_portfolio(largo)
+    corr_perdas = correlacao_perdas(largo)
+
+    st.markdown("**Diversificação estratégica**")
+    col1, col2 = st.columns(2)
+    limiar_perdas_simultaneas = col1.number_input(
+        "Limiar \"perdas simultâneas frequentes\" (correlação nos dias de perda)",
+        min_value=-1.0, max_value=1.0, value=0.5, step=0.05, key="builder_limiar_perdas_simultaneas",
+    )
+    limiar_baixa_correlacao = col2.number_input(
+        "Limiar \"baixa correlação com o conjunto\"",
+        min_value=-1.0, max_value=1.0, value=0.2, step=0.05, key="builder_limiar_baixa_correlacao",
+    )
+    frases = []
+    for i, a in enumerate(incluidos):
+        for b in incluidos[i + 1:]:
+            if corr_perdas.loc[a, b] >= limiar_perdas_simultaneas:
+                frases.append(f"{a} e {b} possuem perdas simultâneas frequentes (correlação {corr_perdas.loc[a, b]:.2f}).")
+        media_a = corr.loc[a].drop(a).mean()
+        if media_a < limiar_baixa_correlacao:
+            frases.append(f"{a} apresenta baixa correlação com o conjunto (média {media_a:.2f}).")
+    if frases:
+        for frase in frases:
+            st.caption(f"• {frase}")
+    else:
+        st.caption("• Nenhuma concentração óbvia detectada nos limiares atuais.")
+
+    clusters = clusters_de_risco(largo, limiar_correlacao=0.5)
+    st.markdown("**Clusters**")
+    for i, cluster in enumerate(clusters):
+        rotulo = "Estratégia independente" if len(cluster) == 1 else f"Cluster {i + 1}"
+        st.caption(f"{rotulo}: {', '.join(cluster)}")
+
+    st.markdown("**Restrições**")
+    col3, col4 = st.columns(2)
+    limite_risco_por_robo_pct = col3.number_input(
+        "Máximo de risco (contribuição ao drawdown) por EA (%)", min_value=0.0, max_value=100.0,
+        value=40.0, step=5.0, key="builder_limite_risco_robo",
+    )
+    limite_risco_por_cluster_pct = col4.number_input(
+        "Máximo de risco (contribuição ao drawdown) por cluster (%)", min_value=0.0, max_value=100.0,
+        value=60.0, step=5.0, key="builder_limite_risco_cluster",
+    )
+    col5, col6 = st.columns(2)
+    min_robos_ativos = col5.number_input(
+        "Mínimo de EAs ativos", min_value=1, max_value=max(len(incluidos), 1),
+        value=min(3, len(incluidos)), step=1, key="builder_min_robos_ativos",
+    )
+    max_contratos_total = col6.number_input(
+        "Máximo de contratos no total", min_value=1, value=12, step=1, key="builder_max_contratos_total",
+    )
+    max_contratos_por_robo = st.number_input(
+        "Máximo de contratos por EA individual (para gerar candidatos na busca)",
+        min_value=1, value=min(int(max_contratos_total), 6), step=1, key="builder_max_contratos_por_robo",
+        help="Controla o tamanho da busca -- cada EA testa de 0 até este valor.",
+    )
+
+    st.session_state["builder_restricoes"] = {
+        "clusters": clusters,
+        "limite_risco_por_robo_pct": limite_risco_por_robo_pct,
+        "limite_risco_por_cluster_pct": limite_risco_por_cluster_pct,
+        "min_robos_ativos": int(min_robos_ativos),
+        "max_contratos_total": int(max_contratos_total),
+        "max_contratos_por_robo": int(max_contratos_por_robo),
+    }
+
+    colnav1, colnav2 = st.columns(2)
+    if colnav1.button("Voltar", icon=":material/arrow_back:", key="builder_passo3_voltar"):
+        st.session_state["builder_step"] = 2
+        st.rerun()
+    if colnav2.button("Avançar", icon=":material/arrow_forward:", key="builder_passo3_avancar"):
+        st.session_state["builder_step"] = 4
+        st.rerun()
+
+
+def _builder_passo4_perfil():
+    st.subheader("Passo 4 -- Escolher o perfil")
+    st.caption("Escolher uma preferência econômica, não uma fórmula matemática. O perfil não muda os dados.")
+
+    perfil = st.radio(
+        "Perfil", ["Preservação", "Equilibrado", "Crescimento", "Customizado"], key="builder_perfil_radio",
+    )
+    descricoes = {
+        "Preservação": "Prioriza menor drawdown, menor pior dia, melhor risco de cauda, menor concentração.",
+        "Equilibrado": "Prioriza retorno razoável, drawdown dentro do orçamento, diversificação, estabilidade.",
+        "Crescimento": "Prioriza maior retorno, usa mais do orçamento de risco.",
+        "Customizado": "Libera os controles avançados do Portfolio Lab -- não gera os 3 candidatos nomeados aqui.",
+    }
+    st.caption(descricoes[perfil])
+    st.session_state["builder_perfil"] = perfil
+
+    colnav1, colnav2 = st.columns(2)
+    if colnav1.button("Voltar", icon=":material/arrow_back:", key="builder_passo4_voltar"):
+        st.session_state["builder_step"] = 3
+        st.rerun()
+    if colnav2.button("Avançar", icon=":material/arrow_forward:", key="builder_passo4_avancar"):
+        st.session_state["builder_step"] = 5
+        st.rerun()
+
+
+def _builder_passo5_candidatos():
+    st.subheader("Passo 5 -- Comparar três carteiras finais")
+
+    diarios_referencia = st.session_state.get("builder_diarios_referencia", {})
+    margens = st.session_state.get("builder_margens_por_contrato", {})
+    incluidos = st.session_state.get("builder_incluidos", [])
+    restricoes = st.session_state.get("builder_restricoes", {})
+    orcamento = st.session_state.get("builder_orcamento", {})
+    perfil = st.session_state.get("builder_perfil", "Equilibrado")
+
+    diarios_incluidos = {n: diarios_referencia[n] for n in incluidos}
+    margens_incluidos = {n: margens.get(n) for n in incluidos}
+    max_por_robo = restricoes.get("max_contratos_por_robo", 6)
+    candidatos_contratos = {n: list(range(0, max_por_robo + 1)) for n in incluidos}
+    n_total_candidatos = (max_por_robo + 1) ** len(incluidos)
+    st.caption(
+        f"{n_total_candidatos} combinações a testar (ajuste \"máximo de contratos por EA\" no Passo 3 "
+        "se for grande demais)."
+    )
+
+    if st.button("Gerar carteiras candidatas", icon=":material/search:"):
+        with st.spinner("Buscando, aplicando o funil de 4 camadas e montando a shortlist..."):
+            try:
+                funil = funil_selecao_portfolio(
+                    diarios_incluidos, margens_incluidos, candidatos_contratos,
+                    percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500.0,
+                    deduplicar_composicao=True,
+                    min_robos_ativos=restricoes.get("min_robos_ativos", 1),
+                    max_contratos_total=restricoes.get("max_contratos_total"),
+                    clusters=restricoes.get("clusters"),
+                    limite_risco_por_robo_pct=restricoes.get("limite_risco_por_robo_pct"),
+                    limite_risco_por_cluster_pct=restricoes.get("limite_risco_por_cluster_pct"),
+                    mdd_maximo=-orcamento["mdd_projeto"] if orcamento.get("mdd_projeto") else None,
+                )
+            except ValueError as erro:
+                st.error(str(erro))
+            else:
+                if not funil["camada4_simplicidade"]:
+                    st.warning("Nenhuma combinação sobreviveu às restrições -- afrouxe o Passo 3 ou o orçamento do Passo 2.")
+                else:
+                    shortlist = shortlist_portfolio(
+                        funil["camada4_simplicidade"], diarios_incluidos, margens_incluidos,
+                        total_contratos_benchmark=restricoes.get("max_contratos_total", 12),
+                        clusters=restricoes.get("clusters"),
+                        percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500.0,
+                    )
+                    st.session_state["builder_shortlist"] = shortlist
+                    st.session_state["builder_funil_n_avaliadas"] = funil["camada1_sobrevivencia"]["n_avaliadas"]
+
+    shortlist = st.session_state.get("builder_shortlist")
+    if shortlist:
+        perfil_para_chave = {"Preservação": "minimum_risk", "Equilibrado": "balanced", "Crescimento": "growth"}
+        chave_recomendada = perfil_para_chave.get(perfil)
+
+        cartas = [
+            ("Conservadora", "minimum_risk", "Menor risco entre as soluções com retorno aceitável."),
+            ("Equilibrada", "balanced", "Melhor compromisso entre retorno, drawdown e robustez."),
+            ("Crescimento", "growth", "Maior retorno entre as soluções que respeitam seu orçamento."),
+        ]
+        cols = st.columns(3)
+        for col, (rotulo, chave, motivo) in zip(cols, cartas):
+            r = shortlist.get(chave)
+            with col:
+                titulo = f"**Carteira {rotulo}**"
+                if chave == chave_recomendada:
+                    titulo += " ⭐ (seu perfil)"
+                st.markdown(titulo)
+                if r is None:
+                    st.caption("Nenhuma combinação satisfaz este perfil.")
+                    continue
+                for nome, v in r["alocacao"].items():
+                    st.caption(f"{nome}: {v} contrato(s)")
+                st.metric("RLT histórico", fmt(r["rlt_acumulado"], 4))
+                st.metric("MDD histórico", fmt(r["mdd"], moeda=True))
+                st.caption(f"Por quê: {motivo}")
+                if st.button("Escolher esta carteira", key=f"builder_escolher::{chave}"):
+                    st.session_state["builder_candidato_escolhido"] = {**r, "perfil": rotulo}
+                    st.session_state["builder_step"] = 6
+                    st.rerun()
+
+    colnav1, colnav2 = st.columns(2)
+    if colnav1.button("Voltar", icon=":material/arrow_back:", key="builder_passo5_voltar"):
+        st.session_state["builder_step"] = 4
+        st.rerun()
+
+
+_BUILDER_FRACOES_DEGRADACAO = {
+    "Cai 25% da expectativa": 0.25,
+    "Cai 50% da expectativa": 0.50,
+    "Vai a zero": 1.0,
+    "Torna-se negativa": 1.5,
+}
+
+
+def _builder_passo6_pior_caso():
+    st.subheader("Passo 6 -- Mostrar o pior caso compreensível")
+
+    candidato = st.session_state.get("builder_candidato_escolhido")
+    if candidato is None:
+        st.info("Escolha uma carteira no Passo 5 primeiro.")
+        if st.button("Voltar ao Passo 5", icon=":material/arrow_back:"):
+            st.session_state["builder_step"] = 5
+            st.rerun()
+        return
+
+    diarios_referencia = st.session_state.get("builder_diarios_referencia", {})
+    margens = st.session_state.get("builder_margens_por_contrato", {})
+    incluidos = st.session_state.get("builder_incluidos", [])
+    diarios_incluidos = {n: diarios_referencia[n] for n in incluidos}
+    margens_incluidos = {n: margens.get(n) for n in incluidos}
+
+    st.markdown(f"**Carteira escolhida: {candidato['perfil']}**")
+    st.caption(", ".join(f"{nome}: {v} contrato(s)" for nome, v in candidato["alocacao"].items()))
+    st.caption(
+        "Somente depois de escolher um candidato mostramos Monte Carlo e stress tests -- "
+        "não antes."
+    )
+
+    st.markdown("**Robustez (Monte Carlo)**")
+    if st.button("Rodar Monte Carlo desta carteira", icon=":material/science:"):
+        with st.spinner("Simulando..."):
+            resultado_mc = robustez_dos_finalistas(
+                diarios_incluidos, margens_incluidos, [candidato],
+                tamanho_bloco=20, n_trajetorias=2000, horizonte=252,
+            )[0]
+        st.session_state["builder_mc_finalista"] = resultado_mc
+    resultado_mc = st.session_state.get("builder_mc_finalista")
+    if resultado_mc:
+        st.caption(
+            f"Em 95% das simulações do modelo: MDD ficou abaixo de "
+            f"{fmt(resultado_mc['mdd_p95'], moeda=True)}. Probabilidade de terminar no "
+            f"prejuízo: {fmt(resultado_mc['probabilidade_prejuizo'] * 100)}%. Probabilidade de "
+            f"recuperar o topo em até 60 pregões: "
+            f"{fmt(resultado_mc['probabilidade_recuperacao_60'] * 100)}%; em até 120 pregões: "
+            f"{fmt(resultado_mc['probabilidade_recuperacao_120'] * 100)}%."
+        )
+
+    st.markdown("**Cenário de degradação**")
+    st.caption(
+        "Backlog de prompts/portfolioBuilder.pdf -- reabre o esquema D (degradação de edge) só "
+        "para esta carteira já escolhida, não para a busca inteira. Recompute determinístico, "
+        "não Monte Carlo."
+    )
+    col1, col2 = st.columns(2)
+    robo_degradado = col1.selectbox("EA a degradar", list(candidato["alocacao"].keys()), key="builder_robo_degradado")
+    fracao_rotulo = col2.selectbox(
+        "Degradação", list(_BUILDER_FRACOES_DEGRADACAO.keys()), key="builder_fracao_degradacao_rotulo",
+    )
+    if st.button("Aplicar cenário de degradação", icon=":material/trending_down:"):
+        resultado_deg = cenario_degradacao_finalista(
+            diarios_incluidos, candidato["alocacao"], margens_incluidos,
+            robo_degradado=robo_degradado, fracao_degradacao=_BUILDER_FRACOES_DEGRADACAO[fracao_rotulo],
+            percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500.0,
+        )
+        st.session_state["builder_degradacao"] = resultado_deg
+    resultado_deg = st.session_state.get("builder_degradacao")
+    if resultado_deg:
+        st.caption(
+            f"Se {resultado_deg['robo_degradado']} {fracao_rotulo.lower()}, o retorno estimado "
+            f"muda em {fmt(resultado_deg['delta_lucro_total'], moeda=True)} e o MDD vai de "
+            f"{fmt(resultado_deg['baseline']['mdd'], moeda=True)} para "
+            f"{fmt(resultado_deg['degradado']['mdd'], moeda=True)}."
+        )
+
+    st.markdown("**Cenário de falha conjunta**")
+    st.caption("Se os EAs repetirem simultaneamente seus piores dias históricos na mesma janela.")
+    if st.button("Rodar cenário de falha conjunta", icon=":material/warning:"):
+        with st.spinner("Simulando..."):
+            resultado_falha = robustez_dos_finalistas(
+                diarios_incluidos, margens_incluidos, [candidato],
+                tamanho_bloco=20, n_trajetorias=1000, horizonte=252, choques=["perda_simultanea"],
+            )[0]
+        st.session_state["builder_falha_conjunta"] = resultado_falha
+    resultado_falha = st.session_state.get("builder_falha_conjunta")
+    if resultado_falha:
+        st.caption(
+            f"Com o choque de perda simultânea aplicado: MDD P95 estimado "
+            f"{fmt(resultado_falha['mdd_p95'], moeda=True)}."
+        )
+
+    st.markdown("**Você consegue manter essa carteira sem interferir se este cenário acontecer?**")
+    resposta = st.radio(
+        "Resposta", ["Sim, continuar", "Não, reduzir risco", "Comparar com a conservadora"],
+        key="builder_resposta_final",
+    )
+    if st.button("Confirmar", icon=":material/check:"):
+        if resposta == "Sim, continuar":
+            st.session_state["builder_step"] = 7
+        elif resposta == "Não, reduzir risco":
+            st.session_state["builder_step"] = 3
+        else:
+            st.session_state["builder_step"] = 5
+        st.rerun()
+
+    if st.button("Voltar", icon=":material/arrow_back:", key="builder_passo6_voltar"):
+        st.session_state["builder_step"] = 5
+        st.rerun()
+
+
+def _builder_passo7_plano_operacional():
+    st.subheader("Passo 7 -- Produzir o plano operacional")
+
+    candidato = st.session_state.get("builder_candidato_escolhido")
+    if candidato is None:
+        st.info("Escolha uma carteira no Passo 5 primeiro.")
+        if st.button("Voltar ao Passo 5", icon=":material/arrow_back:"):
+            st.session_state["builder_step"] = 5
+            st.rerun()
+        return
+
+    diarios_referencia = st.session_state.get("builder_diarios_referencia", {})
+    margens = st.session_state.get("builder_margens_por_contrato", {})
+    incluidos = st.session_state.get("builder_incluidos", [])
+    orcamento = st.session_state.get("builder_orcamento", {})
+    restricoes = st.session_state.get("builder_restricoes", {})
+    resultado_mc = st.session_state.get("builder_mc_finalista")
+
+    # Pior dia histórico da carteira escolhida -- não é um campo do
+    # resultado da busca (que só traz lucro/mdd/es_95/limiar/rlt), então
+    # é recalculado aqui a partir da alocação já fixada.
+    diarios_ativos = {}
+    for nome, n_contratos in candidato["alocacao"].items():
+        if n_contratos == 0 or nome not in diarios_referencia:
+            continue
+        d = diarios_referencia[nome].copy()
+        d["liquido"] = d["liquido_por_contrato"] * n_contratos
+        diarios_ativos[nome] = d
+    pior_dia_historico = None
+    if diarios_ativos:
+        largo_escolhido = restringir_janela_comum(sincronizar_portfolio(diarios_ativos))
+        pior_dia_historico = metricas_agregadas(largo_escolhido)["pior_dia_total"]
+
+    plano = plano_operacional(
+        alocacao_final=candidato["alocacao"],
+        margens_por_contrato={n: margens.get(n) for n in incluidos},
+        capital_reservado=orcamento.get("capital_reservado", 0.0),
+        mdd_projeto=orcamento.get("mdd_projeto", 0.0),
+        mdd_p95_estimado=resultado_mc["mdd_p95"] if resultado_mc else None,
+        pior_dia_historico=pior_dia_historico,
+        limite_risco_por_robo_pct=restricoes.get("limite_risco_por_robo_pct", 45.0),
+    )
+
+    st.markdown("### PORTFÓLIO ESCOLHIDO")
+    for nome, v in plano["alocacao_final"].items():
+        st.caption(f"{nome}: {v} contrato(s)")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Capital reservado", fmt(plano["capital_reservado"], moeda=True))
+    col2.metric("MDD de projeto", fmt(plano["mdd_projeto"], moeda=True))
+    col3.metric("Margem máxima estimada", fmt(plano["margem_maxima_estimada"], moeda=True))
+    col4, col5 = st.columns(2)
+    if plano["mdd_p95_estimado"] is not None:
+        col4.metric("MDD P95 estimado", fmt(plano["mdd_p95_estimado"], moeda=True))
+    else:
+        col4.caption("MDD P95 estimado: rode o Monte Carlo no Passo 6 para preencher.")
+    if plano["pior_dia_historico"] is not None:
+        col5.metric("Pior dia histórico", fmt(plano["pior_dia_historico"], moeda=True))
+
+    st.markdown("**Degraus de drawdown**")
+    for faixa in plano["faixas"]:
+        max_texto = fmt(faixa["max_dd"], moeda=True) if faixa["max_dd"] != float("inf") else "acima"
+        st.caption(f"DD de {fmt(faixa['min_dd'], moeda=True)} a {max_texto}: {faixa['acao']}")
+
+    st.markdown("**Regras de acompanhamento**")
+    st.caption(plano["regras_estaticas"][0])
+    st.caption(
+        f"Reavaliar se: o drawdown ultrapassar {fmt(plano['faixas'][2]['min_dd'], moeda=True)} "
+        "(início da faixa \"reduzir e investigar\")."
+    )
+    st.caption(f"Um EA superar {fmt(plano['limite_risco_por_robo_pct'])}% da contribuição de risco.")
+    for regra in plano["regras_estaticas"][1:]:
+        st.caption(regra)
+    for regra in plano["regras_nao_computadas"]:
+        st.caption(f"{regra} (acompanhamento manual -- sem sinal automático nesta versão).")
+
+    colnav1, colnav2 = st.columns(2)
+    if colnav1.button("Voltar", icon=":material/arrow_back:", key="builder_passo7_voltar"):
+        st.session_state["builder_step"] = 6
+        st.rerun()
+    if colnav2.button("Recomeçar", icon=":material/restart_alt:", key="builder_passo7_recomecar"):
+        for chave in list(st.session_state.keys()):
+            if chave.startswith("builder_"):
+                del st.session_state[chave]
+        st.rerun()
+
+
+def rodar_modo_portfolio_builder():
+    """Portfolio Builder -- fluxo guiado (backlog de
+    prompts/portfolioBuilder.pdf). Estado do passo atual e decisões
+    coletadas vivem em `st.session_state["builder_*"]` -- Streamlit
+    reexecuta o script inteiro a cada interação, então isso é o que
+    persiste a posição no fluxo entre reruns (mesmo padrão já usado
+    pelos resultados de busca/funil/vizinhança no modo Portfólio)."""
+    st.header("Portfolio Builder")
+    st.caption(
+        "Você não precisa escolher entre milhares de combinações. Defina quanto pode perder e "
+        "a ferramenta mostrará três portfólios que cabem nesse limite."
+    )
+
+    arquivos = _builder_selecionar_arquivos_sidebar()
+
+    passo = st.session_state.setdefault("builder_step", 1)
+    rotulos = [
+        "1. EAs", "2. Orçamento", "3. Concentração", "4. Perfil",
+        "5. Candidatos", "6. Pior caso", "7. Plano",
+    ]
+    st.caption(" → ".join(f"**{r}**" if i + 1 == passo else r for i, r in enumerate(rotulos)))
+    st.divider()
+
+    if passo == 1:
+        _builder_passo1_selecionar_eas(arquivos)
+    elif passo == 2:
+        _builder_passo2_orcamento_de_risco()
+    elif passo == 3:
+        _builder_passo3_concentracao()
+    elif passo == 4:
+        _builder_passo4_perfil()
+    elif passo == 5:
+        _builder_passo5_candidatos()
+    elif passo == 6:
+        _builder_passo6_pior_caso()
+    else:
+        _builder_passo7_plano_operacional()
+
+
 st.set_page_config(page_title="Lâmina ao vivo", layout="wide")
 st.title("Lâmina ao vivo")
 
 modo = st.sidebar.radio(
-    "Modo", ["Robô único", "Portfólio"], key="modo_app",
-    help="Portfólio (AGENTS.md épico 10) sincroniza 2+ robôs e mostra métricas agregadas -- "
-         "não substitui a análise detalhada de um robô único.",
+    "Modo", ["Robô único", "Portfólio (Lab)", "Portfolio Builder"], key="modo_app",
+    help="Portfólio (Lab) (AGENTS.md épico 10) sincroniza 2+ robôs e mostra métricas completas "
+         "-- responde \"o que consigo descobrir?\". Portfolio Builder (backlog de "
+         "prompts/portfolioBuilder.pdf) é o fluxo guiado -- responde \"que carteira devo "
+         "considerar?\", mesmo engine por baixo.",
 )
-if modo == "Portfólio":
+if modo == "Portfólio (Lab)":
     rodar_modo_portfolio()
+    st.stop()
+if modo == "Portfolio Builder":
+    rodar_modo_portfolio_builder()
     st.stop()
 
 with st.sidebar:

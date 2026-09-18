@@ -642,26 +642,14 @@ def contribuicao_risco_por_robo(
         por_robo[nome]["participacao_es_pct"] = contrib / es_referencia * 100
 
     # 3. Drawdown -- pior episódio histórico (mesmo que define o MDD).
-    equity = curva_equity(combinada)
-    episodios = calcular_episodios_drawdown(equity)
-    if episodios.empty:
+    resultado_dd = _contribuicao_drawdown_por_robo(largo)
+    if resultado_dd is None:
         raise ValueError(
             "Nenhum episódio de drawdown encontrado na série combinada -- "
             "portfólio nunca ficou abaixo do pico anterior"
         )
-    pior = episodios.loc[episodios["profundidade_rs"].idxmin()]
-    pos_pico = equity.index.get_loc(pior["inicio_pico"])
-    primeiro_dia_submerso = equity.index[pos_pico + 1]
-    janela_episodio = largo.loc[primeiro_dia_submerso:pior["data_fundo"]]
-    lideres_do_dia = janela_episodio.idxmin(axis=1)
-    contagem_lideres = lideres_do_dia.value_counts()
     for nome in nomes:
-        contrib = janela_episodio[nome].sum()
-        por_robo[nome]["contribuicao_drawdown"] = contrib
-        por_robo[nome]["participacao_drawdown_pct"] = contrib / pior["profundidade_rs"] * 100
-        por_robo[nome]["frequencia_lidera_perda_drawdown"] = (
-            contagem_lideres.get(nome, 0) / len(janela_episodio)
-        )
+        por_robo[nome].update(resultado_dd["por_robo"][nome])
 
     return {
         "por_robo": por_robo,
@@ -669,7 +657,64 @@ def contribuicao_risco_por_robo(
         "es_referencia": es_referencia,
         "percentil_cauda": percentil_cauda,
         "n_dias_cauda_es": len(dias_cauda),
-        "episodio_drawdown_referencia": {
+        "episodio_drawdown_referencia": resultado_dd["episodio"],
+    }
+
+
+def _contribuicao_drawdown_por_robo(largo: pd.DataFrame) -> dict:
+    """Extraído de `contribuicao_risco_por_robo` (backlog de
+    `prompts/portfolioBuilder.pdf`, fora dos épicos do PDF-fonte) -- só a
+    seção de DRAWDOWN, sem volatilidade/ES (irrelevantes para o filtro
+    de concentração de `buscar_combinacoes_portfolio_com_filtros`, que
+    também usa esta função). `largo` já deve estar sincronizado (e
+    restrito à janela comum, se aplicável) -- não resincroniza `diarios`
+    do zero, ao contrário de `contribuicao_risco_por_robo` (que recebe
+    `diarios` e monta `largo` sozinha) -- é exatamente essa resincronização
+    redundante que tornaria caro demais usar a função original dentro de
+    um filtro de busca rodado milhares de vezes; o cálculo do episódio em
+    si (sobre um `largo` já pronto) é da mesma ordem de custo que o MDD
+    que a busca já calcula por candidato.
+
+    Retorna `None` (não uma exceção) quando a série combinada nunca ficou
+    abaixo do pico anterior -- cabe a quem chama decidir se isso é um
+    erro (`contribuicao_risco_por_robo`, que audita uma carteira JÁ
+    ESCOLHIDA) ou um caso trivial de "nada a atribuir" (o filtro de
+    concentração da busca, que só descarta candidatas com drawdown REAL
+    concentrado -- sem drawdown nenhum, não há o que podar).
+
+    Caso contrário: `{"por_robo": {nome: {"contribuicao_drawdown",
+    "participacao_drawdown_pct", "frequencia_lidera_perda_drawdown"}},
+    "episodio": {...mesmos campos de episodio_drawdown_referencia...}}` --
+    mesmas fórmulas/convenções já documentadas em
+    `contribuicao_risco_por_robo` (janela pico->fundo inclusive,
+    participação com SINAL -- negativa quando o robô amorteceu o
+    drawdown em vez de causá-lo)."""
+    largo = largo.fillna(0.0)
+    combinada = serie_combinada(largo)
+    equity = curva_equity(combinada)
+    episodios = calcular_episodios_drawdown(equity)
+    if episodios.empty:
+        return None
+
+    pior = episodios.loc[episodios["profundidade_rs"].idxmin()]
+    pos_pico = equity.index.get_loc(pior["inicio_pico"])
+    primeiro_dia_submerso = equity.index[pos_pico + 1]
+    janela_episodio = largo.loc[primeiro_dia_submerso:pior["data_fundo"]]
+    lideres_do_dia = janela_episodio.idxmin(axis=1)
+    contagem_lideres = lideres_do_dia.value_counts()
+
+    por_robo = {}
+    for nome in largo.columns:
+        contrib = janela_episodio[nome].sum()
+        por_robo[nome] = {
+            "contribuicao_drawdown": contrib,
+            "participacao_drawdown_pct": contrib / pior["profundidade_rs"] * 100,
+            "frequencia_lidera_perda_drawdown": contagem_lideres.get(nome, 0) / len(janela_episodio),
+        }
+
+    return {
+        "por_robo": por_robo,
+        "episodio": {
             "inicio_pico": pior["inicio_pico"],
             "data_fundo": pior["data_fundo"],
             "data_recuperacao": pior["data_recuperacao"],
@@ -952,6 +997,10 @@ def buscar_combinacoes_portfolio_com_filtros(
     perda_diaria_maxima: float = None,
     clusters: list = None,
     max_contratos_por_cluster: int = None,
+    max_contratos_total: int = None,
+    limite_risco_por_robo_pct: float = None,
+    limite_risco_por_cluster_pct: float = None,
+    mdd_maximo: float = None,
 ) -> dict:
     """Backlog de `prompts/otimizacao.pdf` (fora dos épicos do PDF-fonte):
     variante de `buscar_combinacoes_portfolio` com um funil de filtros
@@ -971,16 +1020,20 @@ def buscar_combinacoes_portfolio_com_filtros(
        (documento-fonte §13: "escolha a menor escala que represente
        razoavelmente"). Puramente combinatório, não toca nenhum dado --
        roda antes de qualquer outro filtro.
-    2. `min_robos_ativos`/`margem_maxima`/`max_contratos_por_cluster`:
-       filtros baratos calculados só a partir da alocação (quantos
-       candidatos são > 0, margem = margem_por_contrato × contratos
-       somada, soma de contratos dentro de cada grupo de
-       `clusters` -- ver `clusters_de_risco`) -- antes de sincronizar
-       qualquer série diária. `clusters`/`max_contratos_por_cluster`
-       precisam vir JUNTOS (um sem o outro não filtra nada) -- backlog
-       de prompts/otimizacao.pdf §4/§5 ("nenhum cluster acima de X% do
-       risco"; aqui em contratos, não %, mesma simplificação de
-       `max_candidato` por robô já existente).
+    2. `min_robos_ativos`/`margem_maxima`/`max_contratos_por_cluster`/
+       `max_contratos_total`: filtros baratos calculados só a partir da
+       alocação (quantos candidatos são > 0, margem = margem_por_contrato
+       × contratos somada, soma de contratos dentro de cada grupo de
+       `clusters` -- ver `clusters_de_risco`, soma de TODOS os robôs) --
+       antes de sincronizar qualquer série diária. `clusters`/
+       `max_contratos_por_cluster` precisam vir JUNTOS (um sem o outro
+       não filtra nada) -- backlog de prompts/otimizacao.pdf §4/§5
+       ("nenhum cluster acima de X% do risco"; aqui em contratos, não %,
+       mesma simplificação de `max_candidato` por robô já existente).
+       `max_contratos_total` (backlog de prompts/portfolioBuilder.pdf,
+       "Passo 3": "máximo de 12 contratos no total") poda direto de
+       `combinacoes_brutas`, no mesmo ponto do dedupe de composição/
+       escala -- antes de qualquer outro filtro.
     3. `perda_diaria_maxima`: depois de sincronizar (e restringir à
        janela comum, se `usar_janela_comum`), descarta a combinação se o
        PIOR DIA HISTÓRICO da série combinada (`combinada.min()`, já
@@ -989,12 +1042,34 @@ def buscar_combinacoes_portfolio_com_filtros(
        Este NÃO é um cenário estressado/Monte Carlo -- rodar Monte Carlo
        por combinação seria caro demais para um filtro de funil (fica
        para uma fase de finalistas, backlog separado).
+    3b. `mdd_maximo` (backlog de `prompts/portfolioBuilder.pdf`, "Passo
+       2" -- o "MDD de projeto" efetivamente restringindo a busca, não
+       só rotulando o resultado depois): mesmo ponto do laço, MDD
+       calculado diretamente (`drawdowns.maximo_drawdown(drawdowns.
+       drawdown(drawdowns.curva_equity(combinada)))`) sem rodar
+       `metricas_agregadas` inteira (que também calcula TUW/pior mês/
+       lucro mensal, irrelevantes aqui).
+    4. `limite_risco_por_robo_pct`/`limite_risco_por_cluster_pct`
+       (backlog de `prompts/portfolioBuilder.pdf`, **decisão confirmada
+       com o usuário**): depois de sincronizar, descarta a combinação se
+       ALGUM robô (ou soma de robôs de um mesmo `clusters`) ultrapassa
+       esta % de `participacao_drawdown_pct` no PIOR episódio de
+       drawdown da combinação (`_contribuicao_drawdown_por_robo`,
+       extraído de `contribuicao_risco_por_robo` -- mesma fórmula, sem
+       recalcular volatilidade/ES, irrelevantes aqui, nem resincronizar
+       `diarios` do zero). Comparação com SINAL (não `abs`) -- uma
+       participação negativa (o robô amorteceu o drawdown, não causou)
+       nunca conta como concentração. Combinações cuja série combinada
+       nunca teve nenhum drawdown NÃO são podadas por este filtro (nada
+       para atribuir, não é um candidato "concentrado"). Custo
+       incremental modesto -- o cálculo do episódio é da mesma ordem do
+       MDD que a busca já calcula por candidato; o custo caro de
+       `contribuicao_risco_por_robo` vem de RESSINCRONIZAR, evitado aqui
+       porque `largo` já está pronto neste ponto do laço.
 
-    Deliberadamente NÃO incluídos nesta rodada: exposição bruta (nenhuma
-    noção de "exposição" existe hoje no código -- inventar uma violaria
-    AGENTS.md §8, precisa de uma convenção decidida antes) e contribuição
-    máxima de risco por robô (exigiria rodar `contribuicao_risco_por_robo`
-    por combinação, o oposto de um filtro barato -- também backlog).
+    Deliberadamente NÃO incluído: exposição bruta (nenhuma noção de
+    "exposição" existe hoje no código -- inventar uma violaria AGENTS.md
+    §8, precisa de uma convenção decidida antes).
 
     Retorna um `dict` (não uma `list[dict]` como `buscar_combinacoes_
     portfolio`) para expor a contagem de quantas combinações cada camada
@@ -1004,7 +1079,8 @@ def buscar_combinacoes_portfolio_com_filtros(
     passável direto para `selecionar_melhores_combinacoes`/
     `fronteira_pareto`, nenhuma duplicação nelas), `n_combinacoes_totais`,
     `n_puladas_composicao_duplicada`, `n_puladas_sobrevivencia`,
-    `n_puladas_cluster`, `n_puladas_perda_diaria`, `n_avaliadas`.
+    `n_puladas_cluster`, `n_puladas_perda_diaria`, `n_puladas_risco`,
+    `n_avaliadas`.
 
     Mesmo limite/erro de `buscar_combinacoes_portfolio` para o total
     BRUTO de combinações (`_LIMITE_COMBINACOES_OTIMIZACAO`) -- os filtros
@@ -1037,10 +1113,17 @@ def buscar_combinacoes_portfolio_com_filtros(
         sobreviventes = list(menor_por_composicao.values())
         n_puladas_dedupe = n_total - len(sobreviventes)
 
-    resultados = []
     n_puladas_sobrevivencia = 0
+    if max_contratos_total is not None:
+        n_antes_do_total = len(sobreviventes)
+        sobreviventes = [c for c in sobreviventes if sum(c) <= max_contratos_total]
+        n_puladas_sobrevivencia += n_antes_do_total - len(sobreviventes)
+
+    resultados = []
     n_puladas_cluster = 0
     n_puladas_perda_diaria = 0
+    n_puladas_mdd = 0
+    n_puladas_risco = 0
     for combinacao in sobreviventes:
         alocacao = dict(zip(nomes, combinacao))
 
@@ -1073,6 +1156,32 @@ def buscar_combinacoes_portfolio_com_filtros(
                 n_puladas_perda_diaria += 1
                 continue
 
+        if mdd_maximo is not None:
+            combinada = serie_combinada(largo)
+            mdd_combinacao = maximo_drawdown(drawdown(curva_equity(combinada)))
+            if mdd_combinacao < mdd_maximo:
+                n_puladas_mdd += 1
+                continue
+
+        if limite_risco_por_robo_pct is not None or limite_risco_por_cluster_pct is not None:
+            resultado_dd = _contribuicao_drawdown_por_robo(largo)
+            if resultado_dd is not None:
+                participacoes = {n: v["participacao_drawdown_pct"] for n, v in resultado_dd["por_robo"].items()}
+                excede_por_robo = (
+                    limite_risco_por_robo_pct is not None
+                    and any(pct > limite_risco_por_robo_pct for pct in participacoes.values())
+                )
+                excede_por_cluster = (
+                    limite_risco_por_cluster_pct is not None and clusters is not None
+                    and any(
+                        sum(participacoes.get(nome, 0.0) for nome in cluster) > limite_risco_por_cluster_pct
+                        for cluster in clusters
+                    )
+                )
+                if excede_por_robo or excede_por_cluster:
+                    n_puladas_risco += 1
+                    continue
+
         resultados.append(_metricas_de_alocacao(
             alocacao, largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
         ))
@@ -1084,6 +1193,8 @@ def buscar_combinacoes_portfolio_com_filtros(
         "n_puladas_sobrevivencia": n_puladas_sobrevivencia,
         "n_puladas_cluster": n_puladas_cluster,
         "n_puladas_perda_diaria": n_puladas_perda_diaria,
+        "n_puladas_mdd": n_puladas_mdd,
+        "n_puladas_risco": n_puladas_risco,
         "n_avaliadas": len(resultados),
     }
 
@@ -1342,6 +1453,10 @@ def funil_selecao_portfolio(
     perda_diaria_maxima: float = None,
     clusters: list = None,
     max_contratos_por_cluster: int = None,
+    max_contratos_total: int = None,
+    limite_risco_por_robo_pct: float = None,
+    limite_risco_por_cluster_pct: float = None,
+    mdd_maximo: float = None,
     top_n_eficiencia: int = 20,
     tolerancia_robustez_pct: float = 20.0,
     incluir_transferencias_robustez: bool = True,
@@ -1355,9 +1470,11 @@ def funil_selecao_portfolio(
     substituição):
 
     1. **Sobrevivência**: `buscar_combinacoes_portfolio_com_filtros` (já
-       existente) -- todos os parâmetros de filtro dessa função
+       existente) -- TODOS os parâmetros de filtro dessa função
        (dedupe/min_robos_ativos/margem_maxima/perda_diaria_maxima/
-       clusters) são repassados diretamente, nenhuma lógica nova aqui.
+       clusters/max_contratos_por_cluster/max_contratos_total/
+       limite_risco_por_robo_pct/limite_risco_por_cluster_pct/
+       mdd_maximo) são repassados diretamente, nenhuma lógica nova aqui.
     2. **Eficiência**: ranqueia os sobreviventes por `_eficiencia_rlt_mdd`
        (RLT/|MDD|, computável dos campos que a camada 1 já calcula --
        nenhuma fórmula nova) e mantém os `top_n_eficiencia` melhores.
@@ -1396,6 +1513,10 @@ def funil_selecao_portfolio(
         deduplicar_composicao=deduplicar_composicao, min_robos_ativos=min_robos_ativos,
         margem_maxima=margem_maxima, perda_diaria_maxima=perda_diaria_maxima,
         clusters=clusters, max_contratos_por_cluster=max_contratos_por_cluster,
+        max_contratos_total=max_contratos_total,
+        limite_risco_por_robo_pct=limite_risco_por_robo_pct,
+        limite_risco_por_cluster_pct=limite_risco_por_cluster_pct,
+        mdd_maximo=mdd_maximo,
     )
 
     camada2 = sorted(

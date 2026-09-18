@@ -1776,3 +1776,266 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   CLI, aplicado só DEPOIS dos filtros de sobrevivência -- não como
   substituto dos objetivos discretos já existentes
   (`selecionar_melhores_combinacoes`).
+
+---
+
+## Portfolio Builder — fluxo guiado de decisão (backlog de `prompts/portfolioBuilder.pdf`, fora dos épicos do PDF-fonte)
+
+Diagnóstico do usuário confirmado: o modo Portfólio (acima) virou uma
+bancada de pesquisa quantitativa ("o que consigo descobrir sobre esta
+carteira?"), não um assistente de decisão ("que carteira devo
+considerar?"). Em vez de misturar os dois, o modo Portfólio existente
+vira **Portfolio Lab** (renomeado só na UI -- `st.sidebar.radio`, nenhuma
+lógica mudou) e ganha um irmão: **Portfolio Builder**, um fluxo guiado de
+7 passos que reusa o MESMO engine (`tradefolio.portfolio`/`limiar`/
+`drawdowns`/`monte_carlo`/`deterioracao`) por baixo, sem reimplementar
+nenhuma fórmula financeira nova (AGENTS.md §8). Plano completo aprovado
+em `/home/arthur/.claude/plans/synthetic-coalescing-island.md`.
+
+**Decisões confirmadas com o usuário antes de implementar** (AGENTS.md
+§24):
+- Orçamento de risco top-down do usuário é RECONCILIADO contra o
+  modelo de limiar já existente (não aceitar silenciosamente um teto
+  irrealista) -- não um modelo de risco paralelo e desconectado.
+- Concentração por robô/cluster no Passo 3 usará contribuição ao
+  DRAWDOWN (`contribuicao_risco_por_robo`), não margem nem contagem de
+  contratos -- confirmado como computável dentro do funil de busca sem
+  reabrir o problema de performance original, porque o custo
+  incremental é da mesma ordem do cálculo de MDD que a busca já faz por
+  candidato (o custo caro de `contribuicao_risco_por_robo` vem de
+  RESSINCRONIZAR os dados, não do próprio cálculo do episódio).
+- Cenário de degradação por EA (esquema D, excluído do Monte Carlo de
+  portfólio em geral) REABERTO, mas só para o finalista JÁ ESCOLHIDO no
+  Passo 6 -- custo aceitável uma vez, não para milhares de combinações.
+- "Qualidade dos dados"/"infraestrutura compartilhada" -- OMITIDOS
+  nesta versão. Nenhum dos dois conceitos existe no modelo de dados
+  (confirmado por busca no código); TASKS.md já sinalizava "qualidade
+  dos dados" como Épico 14 do PDF-fonte, fora de escopo. Inventar um
+  score aqui violaria AGENTS.md §8/§10.
+- **O "MVP" de 5 passos do documento-fonte é um guia de ORDEM de
+  construção, não um teto de escopo** -- pedido explícito do usuário:
+  os 7 passos completos (incluindo clusters, robustez local e o
+  cenário de degradação reaberto) são o alvo desde o início, construídos
+  em etapas sequenciadas, não uma versão simplificada para depois
+  refazer.
+
+### Etapa 1 (feita): módulo novo + Passos 1 e 2
+- [x] `src/tradefolio/portfolio_builder.py` -- módulo novo (camada de
+  ORQUESTRAÇÃO sobre o engine já existente, não um motor novo; razão
+  para não crescer `portfolio.py` ainda mais: ele já tem ~1600 linhas
+  de engine, o Builder é uma camada de UX distinta por cima).
+- [x] `montar_cartao_ea(diario, margem_por_contrato=None,
+  percentil_cauda=95, fracao_melhores_dias=0.05,
+  limiar_historico_curto_meses=9)` -- cartão do Passo 1, cada campo
+  reusando uma função já existente:
+  - `pregoes`/`meses_historico`, `mdd_por_contrato`,
+    `pior_dia_por_contrato`, `tempo_max_recuperacao`: diretamente de
+    `drawdowns.*` sobre `liquido_por_contrato`.
+  - `dependencia_5_melhores_dias_pct`: mesmo mecanismo de corte por
+    quantil de `metrics.var_historico`, aplicado ao lado SUPERIOR da
+    série -- pode passar de 100% (informação real de concentração, não
+    um erro).
+  - `rlt_por_contrato`: **só se `margem_por_contrato` for informado** --
+    alimenta `report_data.calcular_pagina4` (que só existe em escala
+    TOTAL, confirmado por leitura do próprio código) com o `diario` na
+    escala de referência + margem POR CONTRATO, fazendo a saída
+    existente sair correta por-contrato. `None` (nunca inventado) sem
+    margem.
+  - `alerta_historico_curto`: reusa o degrau de 9 meses já documentado
+    em `limiar._DEGRAUS_INCERTEZA` (convenção de "histórico curto" já
+    existente), não um novo corte.
+  - Campos de qualidade de dados/infraestrutura: **omitidos**, conforme
+    decisão confirmada acima.
+  Verificado por script + 7 testes contra `dados_exemplo/orders_resgat.csv`.
+- [x] `orcamento_de_risco(capital_reservado, perda_maxima_aceitavel,
+  margem_seguranca_pct, mdd_historico_referencia=None,
+  limiar_referencia=None)` -- Passo 2. `mdd_projeto = perda_maxima ×
+  (1 - margem_seguranca_pct/100)` (exemplo do documento-fonte
+  reproduzido exatamente: R$40.000/R$15.000/30% → MDD de projeto
+  R$10.500). Reconciliação: quem chama calcula `mdd_historico_referencia`
+  (MDD real da carteira de referência, 1 contrato de cada EA candidato,
+  via `metricas_agregadas`) e `limiar_referencia` (via
+  `limiar_agregado_portfolio`, mesma carteira de referência) --
+  `orcamento_de_risco` só compara magnitudes, nenhuma fórmula nova.
+  Ambos os alertas ficam `None` (nunca inventados) se a referência
+  correspondente não for informada. Verificado por script + 5 testes.
+- [x] UI em `app.py`: novo modo `"Portfolio Builder"` no
+  `st.sidebar.radio` (ao lado de `"Portfólio (Lab)"`, renomeado só na
+  label). `rodar_modo_portfolio_builder()` com máquina de estados
+  `st.session_state["builder_step"]` (1-7). Passos 3-7 mostram um
+  placeholder "em construção" por enquanto (próximas etapas).
+  - **Bug real encontrado e corrigido durante a verificação**: os
+    widgets de seleção de arquivo (`builder_fonte`/`builder_exemplos`/
+    `builder_upload`) só existiam dentro da função do Passo 1 --
+    Streamlit limpa o `session_state` de um widget com `key` quando ele
+    deixa de ser instanciado numa execução (comportamento documentado
+    do próprio Streamlit), então voltar do Passo 2 para o Passo 1
+    apagava os EAs já escolhidos, travando o usuário. Corrigido:
+    `_builder_selecionar_arquivos_sidebar()` extraído e chamado
+    incondicionalmente em TODO passo, não só no Passo 1; o radio de
+    decisão por EA (`builder_decisao::{nome}`) também ganhou `index=`
+    para restaurar a escolha anterior ao invés de resetar para
+    "Incluir". Verificado via `AppTest`: ida e volta completa
+    (Passo 1 → margens/decisões → Passo 2 → orçamento com os dois
+    alertas de reconciliação disparando corretamente → Voltar) preserva
+    tudo -- seleção de arquivos, margens por EA e decisões incluir/
+    excluir.
+  - Verificado via `AppTest` contra dados reais (resgat/gridhedge/
+    romanos2): cartões batem exatamente com o script de conferência
+    (MDD/contrato, RLT/contrato etc.); MDD de projeto bate exatamente
+    com o exemplo do documento-fonte (R$10.500); os dois alertas de
+    reconciliação (abaixo do histórico / capital insuficiente) disparam
+    corretamente com um orçamento apertado e ficam ausentes com um
+    orçamento real folgado.
+
+### Etapa 2 (feita): filtros de concentração por drawdown + MDD/total máximo
+- [x] `_contribuicao_drawdown_por_robo(largo)` extraído de
+  `contribuicao_risco_por_robo` -- refatoração pura (os 5 testes
+  existentes daquela função continuam passando sem alteração, confirmado
+  antes de seguir). Retorna `None` (não uma exceção) quando não há
+  nenhum episódio de drawdown -- cabe a quem chama decidir se isso é
+  erro (`contribuicao_risco_por_robo`, que audita uma carteira já
+  escolhida) ou caso trivial (o novo filtro de busca, que não pune uma
+  combinação sem drawdown nenhum).
+- [x] `buscar_combinacoes_portfolio_com_filtros` ganhou 4 parâmetros
+  novos, todos opcionais/`None` (mesmo padrão aditivo já usado para
+  dedupe/clusters/epsilon-Pareto/CDaR, backward-compatible com os testes
+  já existentes):
+  - `limite_risco_por_robo_pct`/`limite_risco_por_cluster_pct` --
+    **decisão confirmada com o usuário**: concentração por
+    CONTRIBUIÇÃO AO DRAWDOWN (não margem, não contagem de contratos),
+    comparação com SINAL (participação negativa = o robô amorteceu o
+    drawdown, nunca conta como concentração). Verificado por script + 2
+    testes: com limite de 90% por robô sobre a fixture de 12
+    combinações, 7 são podadas (todas com um robô concentrando >=90% do
+    pior drawdown), sobram 4.
+  - `max_contratos_total`: "Passo 3" do documento-fonte ("máximo de 12
+    contratos no total") -- poda `combinacoes_brutas` no mesmo ponto do
+    dedupe de composição/escala, antes de qualquer outro filtro.
+    Verificado: limite de 5 contratos poda 5 de 12, sobram 7 (6
+    avaliadas após o degenerado 0/0/0 de sempre).
+  - `mdd_maximo`: "Passo 2" do documento-fonte (o "MDD de projeto"
+    efetivamente restringindo a busca, não só rotulando o resultado
+    depois) -- MDD calculado diretamente (`drawdowns.*` sobre a série
+    combinada), sem rodar `metricas_agregadas` inteira (TUW/pior
+    mês/lucro mensal são irrelevantes para este filtro). Verificado:
+    limite de -R$3.000 poda 7 de 11 combinações não-vazias, sobram 4.
+
+### Etapa 3 (feita): UI dos Passos 3, 4 e 5
+- [x] Passo 3: prosa de correlação a partir de `correlacao_portfolio`/
+  `correlacao_perdas` sobre os EAs incluídos, com limiares NOMEADOS e
+  ajustáveis na UI (`limiar_perdas_simultaneas`/`limiar_baixa_correlacao`,
+  não números mágicos escondidos); clusters via `clusters_de_risco`
+  (já existente). Restrições coletadas: `limite_risco_por_robo_pct`/
+  `limite_risco_por_cluster_pct` (Etapa 2), mínimo de EAs ativos, máximo
+  de contratos no total, e um "máximo de contratos por EA individual"
+  (controla o tamanho da grade de busca do Passo 5 -- decisão de
+  implementação, não pedida literalmente pelo documento-fonte, mas
+  necessária para gerar `candidatos_contratos`).
+- [x] Passo 4: perfil (Preservação/Equilibrado/Crescimento/Customizado)
+  -- mapeia direto para as chaves `minimum_risk`/`balanced`/`growth` de
+  `shortlist_portfolio`; "Customizado" não gera os 3 candidatos
+  nomeados (nota apontando para o Portfolio Lab).
+- [x] Passo 5: `funil_selecao_portfolio` (camada 1 com todas as
+  restrições do Passo 3 + `mdd_maximo` derivado do "MDD de projeto" do
+  Passo 2) → `camada4_simplicidade` alimenta `shortlist_portfolio`
+  diretamente. Sempre mostra os 3 nomeados (Conservadora/Equilibrada/
+  Crescimento) -- o perfil do Passo 4 só destaca visualmente um deles
+  como recomendado, não filtra os outros (mesmo espírito do
+  documento-fonte: "o usuário não deveria decidir entre 90 vetores de
+  contratos", mas ainda escolhe entre os 3, comparando).
+- [x] **Bug real encontrado e corrigido durante a verificação**:
+  `funil_selecao_portfolio` (construído numa rodada anterior, antes dos
+  4 filtros novos da Etapa 2 existirem) não encaminhava
+  `max_contratos_total`/`mdd_maximo`/`limite_risco_por_robo_pct`/
+  `limite_risco_por_cluster_pct` para `buscar_combinacoes_portfolio_
+  com_filtros` -- o Passo 5 quebrava com `TypeError` ao tentar usá-los.
+  Corrigido: os 4 parâmetros novos adicionados à assinatura de
+  `funil_selecao_portfolio` e encaminhados, mesmo padrão aditivo dos
+  demais. Verificado por teste dedicado + `AppTest`.
+- [x] Verificado via `AppTest` contra dados reais o fluxo completo
+  Passo 1 → 5: com os limiares padrão do documento-fonte (40%/60% de
+  risco por EA/cluster), a busca voltou vazia -- diagnosticado como
+  comportamento CORRETO, não um bug: com só 3 EAs candidatos (o dado de
+  exemplo), um limite de 40% por EA é quase matematicamente
+  impossível de satisfazer com só 2-3 robôs ativos (as participações
+  somam ~100%, então a média já passa de 40% com só 2 ativos) -- os
+  números do documento-fonte pressupõem um conjunto maior de EAs (seus
+  próprios exemplos usam 4-5). A UI já mostra o aviso certo ("afrouxe o
+  Passo 3 ou o orçamento") nesse caso. Com limiares mais soltos (80%/
+  90%), os 3 candidatos nomeados aparecem com números reais e distintos,
+  e a estrela "seu perfil" destaca corretamente o card certo.
+
+### Etapa 4 (feita): cenário de degradação + UI do Passo 6
+- [x] `portfolio_builder.cenario_degradacao_finalista(diarios_referencia,
+  alocacao, margens_por_contrato, robo_degradado, fracao_degradacao,
+  ...)` -- recompute DETERMINÍSTICO (não Monte Carlo), reusa
+  `deterioracao.reduzir_ganhos` (já existente, já testada no modo Robô
+  único) sobre a série de referência de UM robô só, dentro da alocação
+  já fixada. `fracao_degradacao` mapeia direto para a linguagem do
+  documento-fonte: `0.25`→"cai 25%", `0.5`→"cai 50%", `1.0`→"vai a
+  zero", `>1.0`→"torna-se negativa" (`reduzir_ganhos` inverte o sinal
+  dos dias positivos quando a fração passa de 1 -- mesma função, nenhum
+  caso especial). Reusa `_sincronizar_alocacao`/`_metricas_de_alocacao`
+  de `tradefolio.portfolio`. Verificado por script + 3 testes.
+- [x] UI do Passo 6: narrativa de Monte Carlo via `robustez_dos_
+  finalistas` (já existente) rodado só na carteira JÁ ESCOLHIDA no
+  Passo 5 (nota: usa os campos REAIS disponíveis -- MDD P95,
+  probabilidade de prejuízo, probabilidade de recuperação em 60/120
+  pregões -- não o "pior mês" citado no exemplo do documento-fonte, que
+  não é um campo calculado por `resumo_trajetorias`; nunca inventado).
+  Cenário de degradação com seletor de EA + fração. Cenário de falha
+  conjunta via `robustez_dos_finalistas(..., choques=["perda_simultanea"])`
+  já existente, sem função nova. Pergunta final (Sim continuar → Passo
+  7; Não reduzir risco → volta ao Passo 3; Comparar com a conservadora →
+  volta ao Passo 5). Verificado via `AppTest` contra dados reais: os 3
+  cenários (Monte Carlo, degradação de `orders_resgat` até zero, falha
+  conjunta) produzem números reais e coerentes (MDD piora em todos os
+  três, conforme esperado), e a pergunta final navega corretamente.
+
+### Etapa 5 (feita): plano operacional + Passo 7 + fluxo completo de ponta a ponta
+- [x] `portfolio_builder.plano_operacional(alocacao_final,
+  margens_por_contrato, capital_reservado, mdd_projeto,
+  mdd_p95_estimado=None, pior_dia_historico=None,
+  limite_risco_por_robo_pct=45.0, faixas_pct=(0.50, 0.75, 1.0))` --
+  formatação/bandas PURAS sobre números já calculados, nenhuma fórmula
+  nova. `faixas_pct` e `limite_risco_por_robo_pct` são parâmetros
+  explícitos e ajustáveis (mesmo tratamento de todo outro "knob" de
+  política já existente), não uma reprodução literal dos números de
+  exemplo do documento-fonte (que não formam uma fração redonda de
+  R$10.500 -- só um exemplo ilustrativo). Duas das cinco regras de
+  acompanhamento do documento-fonte ("replicabilidade caiu abaixo de
+  95%", "comportamento saiu do envelope simulado") retornadas
+  SEPARADAMENTE em `regras_nao_computadas` -- exigiriam a seção
+  "Monitor" que o próprio documento-fonte propõe como área separada,
+  fora de escopo aqui; nunca fingidas como sinal automático já
+  calculado. Verificado com 5 testes.
+- [x] UI do Passo 7: "PORTFÓLIO ESCOLHIDO" com a alocação final, capital
+  reservado, MDD de projeto, margem máxima estimada, MDD P95 (se o
+  Monte Carlo do Passo 6 já rodou) e pior dia histórico (recalculado
+  aqui -- não é um campo do resultado da busca). Degraus de drawdown e
+  regras de acompanhamento formatados a partir do `plano_operacional`.
+  Botão "Recomeçar" limpa todo o `st.session_state["builder_*"]` --
+  reinicia o fluxo do zero.
+- [x] **Segundo bug real do mesmo tipo encontrado e corrigido**: o
+  Passo 7 lia `capital_reservado` direto da chave do WIDGET do Passo 2
+  (`st.session_state["builder_capital_reservado"]`) -- mesma classe de
+  bug já corrigida no Passo 1 (Streamlit limpa o estado de um widget
+  com `key` quando ele para de ser instanciado numa execução; o widget
+  do Passo 2 não existe mais quando o usuário está no Passo 7).
+  Corrigido: `capital_reservado`/`perda_maxima_aceitavel` agora são
+  guardados dentro do dict `orcamento` (chave PLANA, já persistia
+  corretamente) no momento em que são coletados, e o Passo 7 lê de lá.
+  Auditados TODOS os outros `st.session_state.get("builder_*")`
+  cross-passo do módulo para confirmar que nenhum outro lê uma chave de
+  widget diretamente -- todos os demais já usavam dicts/valores planos.
+  Verificado via `AppTest`: fluxo completo Passo 1 → 7 com dados reais,
+  "Capital reservado" mostra R$40.000,00 corretamente (antes mostrava
+  R$0,00), e "Recomeçar" volta ao Passo 1 com a seleção de arquivos
+  limpa (confirma que a limpeza de `session_state` funciona por
+  completo, sem deixar estado zumbi).
+
+**Portfolio Builder: os 7 passos do plano aprovado estão implementados,
+testados (TDD RED→GREEN em cada função nova) e verificados via `AppTest`
+de ponta a ponta contra dados reais.** Ver `posts/` para o rascunho de
+post sobre a motivação desta seção (a divisão Lab/Builder).

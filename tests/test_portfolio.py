@@ -877,6 +877,99 @@ def test_buscar_combinacoes_portfolio_com_filtros_limite_por_cluster():
     assert {"resgat": 6, "gridhedge": 0, "romanos2": 2} in alocacoes
 
 
+# --- Concentração por CONTRIBUIÇÃO AO DRAWDOWN (backlog de
+# prompts/portfolioBuilder.pdf, fora dos épicos do PDF-fonte) --------------
+#
+# Continuação dos limites por robô/cluster acima -- decisão CONFIRMADA
+# com o usuário: em vez de contagem de contratos (já existente) ou
+# margem, este limite usa a CONTRIBUIÇÃO REAL AO DRAWDOWN (mesma lógica
+# de `contribuicao_risco_por_robo`, extraída para `_contribuicao_
+# drawdown_por_robo` para ser reusada aqui sem resincronizar `diarios`
+# do zero nem recalcular volatilidade/ES, irrelevantes para este
+# filtro). Comparação usa o valor COM SINAL (não `abs`) -- uma
+# participação NEGATIVA significa que aquele robô amorteceu o
+# drawdown (diversificação), nunca deveria contar como concentração.
+# Combinações cuja série combinada nunca teve NENHUM drawdown (raro,
+# mas possível) não são podadas por este filtro -- nada para atribuir,
+# não é um erro (distinto de `contribuicao_risco_por_robo`, que levanta
+# `ValueError` nesse caso -- lá é uma carteira JÁ ESCOLHIDA sendo
+# auditada, aqui é uma entre milhares de candidatas de uma busca).
+# Valores conferidos por script antes destes testes.
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_limite_risco_por_robo():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        limite_risco_por_robo_pct=90.0, **_PARAMS_10_8,
+    )
+    assert resultado["n_combinacoes_totais"] == 12
+    assert resultado["n_puladas_risco"] == 7
+    assert resultado["n_avaliadas"] == 4
+
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    for esperada in [
+        {"resgat": 0, "gridhedge": 1, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 1, "romanos2": 2},
+        {"resgat": 6, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 6, "gridhedge": 1, "romanos2": 2},
+    ]:
+        assert esperada in alocacoes
+    # resgat sozinho concentra 100% do drawdown -- podada.
+    assert {"resgat": 3, "gridhedge": 0, "romanos2": 0} not in alocacoes
+    assert {"resgat": 6, "gridhedge": 0, "romanos2": 0} not in alocacoes
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_limite_risco_por_cluster():
+    diarios = _diarios_reais()
+    clusters = [["resgat", "gridhedge"], ["romanos2"]]
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        clusters=clusters, limite_risco_por_cluster_pct=95.0, **_PARAMS_10_8,
+    )
+    assert resultado["n_puladas_risco"] == 7
+    assert resultado["n_avaliadas"] == 4
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    assert {"resgat": 3, "gridhedge": 1, "romanos2": 2} in alocacoes
+    # cluster resgat+gridhedge concentra 100% do drawdown (romanos2 == 0).
+    assert {"resgat": 3, "gridhedge": 1, "romanos2": 0} not in alocacoes
+
+
+# --- Máximo de contratos NO TOTAL (backlog de
+# prompts/portfolioBuilder.pdf §"Passo 3", fora dos épicos do PDF-fonte) ---
+#
+# Distinto de `max_contratos_por_cluster` (soma dentro de um grupo) --
+# aqui é a soma de TODOS os robôs da alocação, qualquer que seja o
+# agrupamento. Camada 1 (sobrevivência), pura aritmética sobre a
+# combinação -- pruning acontece ANTES de qualquer outro filtro, no
+# mesmo ponto do dedupe de composição/escala.
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_max_contratos_total():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        max_contratos_total=5, **_PARAMS_10_8,
+    )
+    assert resultado["n_combinacoes_totais"] == 12
+    assert resultado["n_puladas_sobrevivencia"] == 5
+    assert resultado["n_avaliadas"] == 6
+
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    for esperada in [
+        {"resgat": 0, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 0, "gridhedge": 1, "romanos2": 0},
+        {"resgat": 0, "gridhedge": 1, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 0},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 1, "romanos2": 0},
+    ]:
+        assert esperada in alocacoes
+    # total 6, 7, 8 ou 9 contratos -- acima do limite de 5.
+    assert {"resgat": 3, "gridhedge": 1, "romanos2": 2} not in alocacoes
+    assert {"resgat": 6, "gridhedge": 0, "romanos2": 0} not in alocacoes
+
+
 def test_buscar_combinacoes_portfolio_com_filtros_perda_diaria_maxima():
     diarios = _diarios_reais()
     resultado = buscar_combinacoes_portfolio_com_filtros(
@@ -893,6 +986,38 @@ def test_buscar_combinacoes_portfolio_com_filtros_perda_diaria_maxima():
         {"resgat": 3, "gridhedge": 0, "romanos2": 2},
     ]:
         assert esperada in alocacoes
+
+
+# --- MDD máximo (backlog de prompts/portfolioBuilder.pdf "Passo 2",
+# fora dos épicos do PDF-fonte) --------------------------------------------
+#
+# Distinto de `perda_diaria_maxima` (pior DIA histórico) -- este filtro
+# usa o MDD (drawdown peak-to-trough) da combinação, calculado
+# diretamente (`drawdowns.*` sobre a série combinada) sem rodar
+# `metricas_agregadas` inteira (que também calcula TUW/pior mês/lucro
+# mensal, irrelevantes para este filtro) -- mesmo espírito de custo
+# incremental modesto já documentado para os filtros de risco por
+# drawdown. Serve para o "MDD de projeto" do Passo 2 do Builder
+# efetivamente restringir a busca, não só rotular o resultado depois.
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_mdd_maximo():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        mdd_maximo=-3000.0, **_PARAMS_10_8,
+    )
+    assert resultado["n_puladas_mdd"] == 7
+    assert resultado["n_avaliadas"] == 4
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    for esperada in [
+        {"resgat": 3, "gridhedge": 0, "romanos2": 0},
+        {"resgat": 3, "gridhedge": 1, "romanos2": 0},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 0, "gridhedge": 0, "romanos2": 2},
+    ]:
+        assert esperada in alocacoes
+    assert {"resgat": 6, "gridhedge": 1, "romanos2": 2} not in alocacoes
 
 
 def test_buscar_combinacoes_portfolio_com_filtros_equivale_a_busca_original_sem_filtros():
@@ -950,6 +1075,29 @@ def test_buscar_combinacoes_portfolio_com_filtros_excede_limite_levanta_erro():
 # conferidos por script antes destes testes.
 
 _PARAMS_FUNIL = dict(percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500)
+
+
+def test_funil_selecao_portfolio_encaminha_max_contratos_total_e_mdd_maximo():
+    # Backlog de prompts/portfolioBuilder.pdf: funil_selecao_portfolio
+    # precisa encaminhar os filtros novos da camada 1
+    # (max_contratos_total/mdd_maximo/limite_risco_por_robo_pct/
+    # limite_risco_por_cluster_pct) para buscar_combinacoes_portfolio_
+    # com_filtros -- senão o Builder não consegue restringir a busca
+    # pelo orçamento de risco (Passo 2) nem pela concentração (Passo 3).
+    diarios = _diarios_reais()
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        max_contratos_total=5, mdd_maximo=-3000.0, **_PARAMS_FUNIL,
+    )
+    camada1 = funil["camada1_sobrevivencia"]
+    assert camada1["n_combinacoes_totais"] == 12
+    # mesmos números já verificados isoladamente para cada filtro --
+    # aqui só confirma que chegam à camada 1 quando passados por aqui.
+    assert camada1["n_puladas_sobrevivencia"] >= 5  # max_contratos_total=5 sozinho já poda 5
+    assert camada1["n_puladas_mdd"] >= 0
+    for r in camada1["resultados"]:
+        assert sum(r["alocacao"].values()) <= 5
+        assert r["mdd"] >= -3000.0
 
 
 def test_funil_selecao_portfolio_camada2_eficiencia():
