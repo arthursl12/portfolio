@@ -113,12 +113,33 @@ def circular_block_bootstrap(
     )
 
 
-def resumo_trajetorias(resultado: ResultadoBootstrap, minimum_margin: float = None, limiar: float = None) -> dict:
+def resumo_trajetorias(
+    resultado: ResultadoBootstrap,
+    minimum_margin: float = None,
+    limiar: float = None,
+    confianca_cdar: float = 0.95,
+    horizontes_recuperacao: tuple = (60, 120),
+) -> dict:
     """Percentis e probabilidades sobre as trajetórias simuladas
     (AGENTS.md épico 8.4). `minimum_margin`/`limiar` opcionais -- as
     chaves de probabilidade correspondentes só aparecem quando
     informados (mesmo padrão de `report_data.calcular_pagina1`'s
-    `ordens` opcional: nada é calculado sem o dado necessário)."""
+    `ordens` opcional: nada é calculado sem o dado necessário).
+
+    `cdar_{confianca_cdar*100}` (backlog de `prompts/otimizacao.pdf`
+    §12): Conditional Drawdown at Risk -- `metrics.expected_shortfall`
+    aplicado à distribuição de MDD por trajetória em vez de à
+    distribuição de retornos (mesma mecânica: média dos valores abaixo
+    do percentil-limiar), generalização padrão do mercado, não uma
+    fórmula nova.
+
+    `probabilidade_recuperacao_{N}` para cada `N` em
+    `horizontes_recuperacao` (padrão do documento-fonte: 60/120
+    pregões): fração das trajetórias cujo equity retorna ao pico que
+    precedeu o PIOR drawdown daquela trajetória em até `N` pregões
+    depois do fundo. Uma trajetória cujo fundo é o ÚLTIMO dia (sem dias
+    seguintes para recuperar) conta como NÃO recuperada, nunca invertido
+    silenciosamente."""
     trajetorias = resultado.trajetorias
     if trajetorias.ndim == 3:
         trajetorias = trajetorias.sum(axis=2)  # soma entre colunas -> resultado total por dia
@@ -145,4 +166,140 @@ def resumo_trajetorias(resultado: ResultadoBootstrap, minimum_margin: float = No
         resumo["probabilidade_toca_margem"] = float((equity.min(axis=1) <= -minimum_margin).mean())
     if limiar is not None:
         resumo["probabilidade_termina_abaixo_do_limiar"] = float((lucro_total < limiar).mean())
+
+    limite_cdar = np.percentile(mdd_por_trajetoria, (1 - confianca_cdar) * 100)
+    chave_cdar = f"cdar_{int(round(confianca_cdar * 100))}"
+    resumo[chave_cdar] = float(mdd_por_trajetoria[mdd_por_trajetoria <= limite_cdar].mean())
+
+    trough_idx_por_trajetoria = drawdown.argmin(axis=1)
+    horizonte = trajetorias.shape[1]
+    for n_dias in horizontes_recuperacao:
+        recuperadas = 0
+        for t, trough_idx in enumerate(trough_idx_por_trajetoria):
+            fim = min(trough_idx + 1 + n_dias, horizonte)
+            janela = equity[t, trough_idx + 1:fim]
+            if len(janela) and (janela >= running_max[t, trough_idx]).any():
+                recuperadas += 1
+        resumo[f"probabilidade_recuperacao_{n_dias}"] = recuperadas / len(trough_idx_por_trajetoria)
+
     return resumo
+
+
+def embaralhamento_dias(
+    dados, n_trajetorias: int, seed: int = None, incluir_dias_sem_operacao: bool = True,
+) -> ResultadoBootstrap:
+    """Esquema A (backlog de `prompts/otimizacao.pdf` §11.A, fora dos
+    épicos do PDF-fonte): "muda a ordem dos resultados, preservando os
+    mesmos dias." Distinto de `circular_block_bootstrap(tamanho_bloco=1)`
+    -- aquele reamostra COM reposição (dias podem repetir, outros nunca
+    são sorteados); esta é uma PERMUTAÇÃO sem reposição do MESMO conjunto
+    de dias, uma vez por trajetória. Limitação documentada pelo próprio
+    documento-fonte: "não cria eventos novos" -- serve para isolar o
+    risco de SEQUÊNCIA (MDD/duração de drawdown dependem da ordem, não
+    só do conjunto), não para estudar cenários fora da amostra histórica
+    (isso é o esquema C, ver `aplicar_choque`).
+
+    Não recebe `horizonte`: sempre igual ao número de dias disponíveis
+    após o filtro de atividade -- uma permutação não pode ser maior nem
+    menor que o conjunto que está permutando sem inventar reposição ou
+    truncamento, o que descaracterizaria o esquema."""
+    e_dataframe = isinstance(dados, pd.DataFrame)
+    valores = dados.to_numpy(dtype=float)
+    if not e_dataframe:
+        valores = valores.reshape(-1, 1)
+
+    if not incluir_dias_sem_operacao:
+        linhas_com_atividade = ~(valores == 0).all(axis=1)
+        valores = valores[linhas_com_atividade]
+
+    n = len(valores)
+    if n == 0:
+        raise ValueError("nenhum dia disponível para embaralhar (série vazia após o filtro de atividade)")
+
+    if seed is None:
+        seed = int(np.random.SeedSequence().entropy)
+    rng = np.random.default_rng(seed)
+
+    trajetorias = np.empty((n_trajetorias, n, valores.shape[1]))
+    for t in range(n_trajetorias):
+        trajetorias[t] = valores[rng.permutation(n)]
+    if not e_dataframe:
+        trajetorias = trajetorias[:, :, 0]
+
+    return ResultadoBootstrap(
+        trajetorias=trajetorias,
+        colunas=tuple(dados.columns) if e_dataframe else None,
+        seed=seed,
+        tamanho_bloco=None,
+        n_trajetorias=n_trajetorias,
+        horizonte=n,
+        incluiu_dias_sem_operacao=incluir_dias_sem_operacao,
+    )
+
+
+_TIPOS_CHOQUE = ("pior_dia_repetido", "perda_simultanea")
+
+
+def aplicar_choque(resultado: ResultadoBootstrap, dados, tipo: str, seed: int = None) -> ResultadoBootstrap:
+    """Esquema C, parcial (backlog de `prompts/otimizacao.pdf` §11.C,
+    fora dos épicos do PDF-fonte). **Decisão confirmada com o usuário**
+    (AGENTS.md §24): só estes dois choques -- "slippage dobrado" (mesma
+    lacuna que excluiu o esquema D de degradação de edge: `bruto`/
+    `custo` não são separáveis na série agregada do portfólio) e
+    "correlação elevada artificialmente" (exigiria inventar uma técnica
+    de covariância/cópula não pedida) ficam de fora, mesmo raciocínio já
+    documentado para o esquema D.
+
+    Recebe um `ResultadoBootstrap` JÁ SIMULADO (`circular_block_
+    bootstrap`/`embaralhamento_dias`) -- o choque é uma AVARIA aplicada
+    sobre uma simulação de base, não um esquema de reamostragem próprio.
+    Substitui, em CADA trajetória, um dia em posição aleatória por um
+    "dia de choque":
+
+    - `"pior_dia_repetido"`: a linha HISTÓRICA REAL do dia em que a
+      série combinada (soma entre colunas) foi pior -- preserva a
+      composição real daquele dia entre os robôs, não inventa uma.
+    - `"perda_simultanea"`: um dia SINTÉTICO onde cada robô,
+      independentemente, está no SEU PRÓPRIO pior dia histórico (podem
+      ser datas diferentes na realidade) -- testa a suposição de
+      correlação de cauda, não reproduz um dia que de fato ocorreu.
+
+    Levanta `ValueError` se `tipo` não for um dos dois suportados."""
+    if tipo not in _TIPOS_CHOQUE:
+        raise ValueError(f"tipo deve ser um de {_TIPOS_CHOQUE}, recebido {tipo!r}")
+
+    e_dataframe = resultado.colunas is not None
+    valores = dados.to_numpy(dtype=float)
+    if not e_dataframe:
+        valores = valores.reshape(-1, 1)
+
+    if tipo == "pior_dia_repetido":
+        combinada = valores.sum(axis=1)
+        dia_choque = valores[combinada.argmin()]
+    else:  # perda_simultanea
+        dia_choque = valores.min(axis=0)
+
+    if seed is None:
+        seed = int(np.random.SeedSequence().entropy)
+    rng = np.random.default_rng(seed)
+
+    trajetorias = resultado.trajetorias.copy()
+    if not e_dataframe:
+        trajetorias = trajetorias.reshape(resultado.n_trajetorias, resultado.horizonte, 1)
+
+    posicoes = rng.integers(0, resultado.horizonte, size=resultado.n_trajetorias)
+    for t, pos in enumerate(posicoes):
+        trajetorias[t, pos, :] = dia_choque
+
+    if not e_dataframe:
+        trajetorias = trajetorias[:, :, 0]
+
+    return ResultadoBootstrap(
+        trajetorias=trajetorias,
+        colunas=resultado.colunas,
+        seed=seed,
+        tamanho_bloco=resultado.tamanho_bloco,
+        n_trajetorias=resultado.n_trajetorias,
+        horizonte=resultado.horizonte,
+        incluiu_dias_sem_operacao=resultado.incluiu_dias_sem_operacao,
+    )

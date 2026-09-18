@@ -63,7 +63,12 @@ from tradefolio.drawdowns import (
     maximo_drawdown,
     time_under_water_max,
 )
-from tradefolio.monte_carlo import circular_block_bootstrap, resumo_trajetorias
+from tradefolio.monte_carlo import (
+    aplicar_choque,
+    circular_block_bootstrap,
+    embaralhamento_dias,
+    resumo_trajetorias,
+)
 
 
 def sincronizar_portfolio(diarios: dict, multiplicadores: dict = None) -> pd.DataFrame:
@@ -187,6 +192,91 @@ def robustez_portfolio(
     resumo["n_trajetorias"] = n_trajetorias
     resumo["horizonte"] = horizonte
     return resumo
+
+
+def robustez_dos_finalistas(
+    diarios_referencia: dict,
+    margens_por_contrato: dict,
+    finalistas: list,
+    esquema: str = "bloco",
+    tamanho_bloco: int = 20,
+    n_trajetorias: int = 2000,
+    horizonte: int = 252,
+    seed: int = None,
+    incluir_dias_sem_operacao: bool = True,
+    usar_janela_comum: bool = True,
+    choques: list = None,
+) -> list:
+    """Backlog de `prompts/otimizacao.pdf` §10 ("o Monte Carlo entra
+    DEPOIS da triagem, não para rodar profundamente em todas as 6 mil
+    combinações"), fora dos épicos do PDF-fonte. `finalistas`: lista
+    pequena de resultados já escolhidos (tipicamente `funil_selecao_
+    portfolio(...)['camada4_simplicidade']`, mas qualquer `list[dict]`
+    com uma chave `"alocacao"` serve -- ex. o `top_n` de `selecionar_
+    melhores_combinacoes`). NÃO recalcula nada da busca -- só sincroniza
+    cada alocação (`_sincronizar_alocacao`, já existente) e roda a
+    máquina de bootstrap já testada.
+
+    Distinta de `robustez_portfolio` (que continua intocada, servindo o
+    uso manual já existente na UI de um `largo` só): esta função expõe
+    `esquema`/`choques`, que `robustez_portfolio` não tem --
+    `esquema="bloco"` (padrão) usa `circular_block_bootstrap` (esquema B
+    já existente); `esquema="embaralhamento"` usa `embaralhamento_dias`
+    (esquema A) -- nesse caso `horizonte` é IGNORADO (embaralhamento não
+    tem esse conceito, a trajetória é sempre do tamanho da amostra,
+    documentado em `embaralhamento_dias`). `choques`: lista opcional de
+    tipos de `aplicar_choque` (esquema C parcial -- `"pior_dia_repetido"`/
+    `"perda_simultanea"`) aplicados em sequência sobre a simulação base.
+
+    `minimum_margin`/`limiar` de cada finalista vêm do PRÓPRIO resultado
+    (margem somada da alocação sincronizada, `limiar_ativo` já calculado
+    pela busca) -- nunca recalculados aqui. Finalistas degenerados (0
+    contratos em todos os robôs) ou sem janela comum são pulados
+    silenciosamente, mesma convenção de `buscar_combinacoes_portfolio`.
+
+    Retorna uma lista NA MESMA ORDEM de `finalistas` (menos os pulados),
+    cada entrada `{"alocacao": ..., **resumo_de_robustez}` -- `resumo`
+    ganha `"esquema"`/`"choques_aplicados"` além dos campos já expostos
+    por `resumo_trajetorias` (percentis, CDaR, probabilidade de
+    recuperação, etc.)."""
+    if esquema not in ("bloco", "embaralhamento"):
+        raise ValueError(f"esquema deve ser 'bloco' ou 'embaralhamento', recebido {esquema!r}")
+    choques = choques or []
+
+    resultados = []
+    for finalista in finalistas:
+        alocacao = finalista["alocacao"]
+        largo, margens_ativas = _sincronizar_alocacao(
+            alocacao, diarios_referencia, margens_por_contrato, usar_janela_comum,
+        )
+        if largo is None:
+            continue
+        dados = largo.fillna(0.0)
+
+        if esquema == "bloco":
+            base = circular_block_bootstrap(
+                dados, tamanho_bloco=tamanho_bloco, n_trajetorias=n_trajetorias, horizonte=horizonte,
+                seed=seed, incluir_dias_sem_operacao=incluir_dias_sem_operacao,
+            )
+        else:
+            base = embaralhamento_dias(
+                dados, n_trajetorias=n_trajetorias, seed=seed,
+                incluir_dias_sem_operacao=incluir_dias_sem_operacao,
+            )
+
+        resultado_bootstrap = base
+        for tipo_choque in choques:
+            resultado_bootstrap = aplicar_choque(resultado_bootstrap, dados, tipo=tipo_choque, seed=seed)
+
+        resumo = resumo_trajetorias(
+            resultado_bootstrap, minimum_margin=sum(margens_ativas.values()),
+            limiar=finalista.get("limiar_ativo"),
+        )
+        resumo["seed"] = resultado_bootstrap.seed
+        resumo["esquema"] = esquema
+        resumo["choques_aplicados"] = list(choques)
+        resultados.append({"alocacao": alocacao, **resumo})
+    return resultados
 
 
 def correlacao_portfolio(largo: pd.DataFrame) -> pd.DataFrame:
@@ -587,6 +677,97 @@ def contribuicao_risco_por_robo(
             "pregoes_ate_fundo": pior["pregoes_ate_fundo"],
         },
     }
+
+
+def scores_individuais_portfolio(
+    diarios: dict,
+    percentil_cauda: int = 95,
+    fracao_melhores_dias: float = 0.05,
+    fracao_piores_dias: float = 0.20,
+    usar_janela_comum: bool = True,
+) -> dict:
+    """Backlog de `prompts/otimizacao.pdf` §3 ("avalie a qualidade
+    individual, mas não ranqueie somente por ela"). O documento pede 3
+    scores por robô mantidos SEPARADOS -- "não some imediatamente os três
+    em uma nota arbitrária". **Decisão confirmada com o usuário**
+    (AGENTS.md §24): em vez de reduzir cada eixo a UM número (o que
+    exigiria inventar uma fórmula de normalização/peso que ninguém
+    pediu), esta função devolve as métricas BRUTAS de cada eixo,
+    agrupadas em 3 seções por robô -- nenhuma agregação nova, só reuso
+    do que já existe, organizado pelo eixo que o documento atribui a
+    cada métrica:
+
+    - `"retorno"`: `lucro_liquido` (soma), `expectativa_diaria`
+      (`metrics.expectancia`), `desvio_padrao_diario`
+      (`metrics.desvio_padrao` -- proxy de "estabilidade dos retornos",
+      MENOR é mais estável), `resultado_sem_melhores_dias` (soma
+      excluindo os `fracao_melhores_dias` melhores dias -- mesmo
+      mecanismo de corte por quantil de `metrics.var_historico`, só no
+      lado superior da série).
+    - `"risco"`: `mdd`, `es` (`metrics.expected_shortfall`), `pior_dia`,
+      `duracao_drawdown_max` (`drawdowns.time_under_water_max`),
+      `maior_sequencia_perdas` (`metrics.maior_sequencia`).
+    - `"diversificacao"`: `correlacao_media` (`correlacao_portfolio`),
+      `correlacao_dias_negativos` (`correlacao_perdas`),
+      `coincidencia_piores_dias` (`correlacao_piores_dias`),
+      `contribuicao_drawdown_portfolio_pct` (reusa
+      `contribuicao_risco_por_robo`, não recalcula), e
+      `retorno_quando_outros_perdem` (média do resultado do robô nos
+      dias em que a soma dos OUTROS robôs foi negativa -- `NaN` se isso
+      nunca ocorreu, nunca inventado como 0).
+
+    Todas as métricas de cada eixo operam sobre a série `liquido` de
+    cada robô DENTRO da janela usada (`usar_janela_comum=True`, padrão,
+    mesmo espírito do resto do módulo). Exige 2+ robôs -- as métricas de
+    diversificação não são um conceito coerente para um portfólio de 1
+    robô (não há "os outros" para comparar)."""
+    if len(diarios) < 2:
+        raise ValueError("scores_individuais_portfolio exige ao menos 2 robôs no portfólio")
+
+    largo = sincronizar_portfolio(diarios)
+    if usar_janela_comum:
+        largo = restringir_janela_comum(largo)
+    nomes = list(largo.columns)
+
+    corr = correlacao_portfolio(largo)
+    corr_perdas = correlacao_perdas(largo)
+    corr_piores = correlacao_piores_dias(largo, fracao=fracao_piores_dias)
+    contribuicoes = contribuicao_risco_por_robo(
+        diarios, percentil_cauda=percentil_cauda, usar_janela_comum=usar_janela_comum,
+    )["por_robo"]
+
+    resultado = {}
+    for nome in nomes:
+        serie = largo[nome]
+        dd = drawdown(curva_equity(serie))
+        limite_superior = serie.quantile(1 - fracao_melhores_dias)
+
+        outros = largo.drop(columns=[nome]).sum(axis=1)
+        dias_outros_perdem = outros[outros < 0].index
+
+        resultado[nome] = {
+            "retorno": {
+                "lucro_liquido": serie.sum(),
+                "expectativa_diaria": metrics.expectancia(serie),
+                "desvio_padrao_diario": metrics.desvio_padrao(serie),
+                "resultado_sem_melhores_dias": serie[serie < limite_superior].sum(),
+            },
+            "risco": {
+                "mdd": maximo_drawdown(dd),
+                "es": metrics.expected_shortfall(serie, percentil_cauda / 100),
+                "pior_dia": serie.min(),
+                "duracao_drawdown_max": time_under_water_max(dd),
+                "maior_sequencia_perdas": metrics.maior_sequencia(serie, positivo=False),
+            },
+            "diversificacao": {
+                "correlacao_media": corr.loc[nome].drop(nome).mean(),
+                "correlacao_dias_negativos": corr_perdas.loc[nome].drop(nome).mean(),
+                "coincidencia_piores_dias": corr_piores.loc[nome].drop(nome).mean(),
+                "contribuicao_drawdown_portfolio_pct": contribuicoes[nome]["participacao_drawdown_pct"],
+                "retorno_quando_outros_perdem": largo.loc[dias_outros_perdem, nome].mean(),
+            },
+        }
+    return resultado
 
 
 _OBJETIVOS_OTIMIZACAO = (
@@ -1130,6 +1311,131 @@ def vizinhanca_local(
     return {"base": base_resultado, "vizinhas": vizinhas}
 
 
+def _eficiencia_rlt_mdd(rlt_acumulado: float, mdd: float) -> float:
+    """RLT/|MDD| -- maior é melhor. `mdd == 0` (nunca houve drawdown)
+    trataria uma divisão por zero: `+inf` se RLT > 0 (eficiência
+    infinita, literalmente nenhum risco incorrido para o retorno obtido),
+    `-inf` se RLT < 0 (prejuízo sem nenhum drawdown reconhecido é pior
+    que qualquer combinação com MDD), `nan` se RLT também é 0 (nenhuma
+    base de comparação) -- mesmo espírito das convenções de borda já
+    documentadas em `metrics.payoff`/`metrics.profit_factor`."""
+    if mdd == 0:
+        if rlt_acumulado > 0:
+            return math.inf
+        if rlt_acumulado < 0:
+            return -math.inf
+        return math.nan
+    return rlt_acumulado / abs(mdd)
+
+
+def funil_selecao_portfolio(
+    diarios_referencia: dict,
+    margens_por_contrato: dict,
+    candidatos_contratos: dict,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = None,
+    usar_janela_comum: bool = True,
+    deduplicar_composicao: bool = False,
+    min_robos_ativos: int = 0,
+    margem_maxima: float = None,
+    perda_diaria_maxima: float = None,
+    clusters: list = None,
+    max_contratos_por_cluster: int = None,
+    top_n_eficiencia: int = 20,
+    tolerancia_robustez_pct: float = 20.0,
+    incluir_transferencias_robustez: bool = True,
+) -> dict:
+    """Backlog de `prompts/otimizacao.pdf` §6 ("eu não escolheria entre
+    'máximo RLT' e 'mínimo MDD'. Usaria uma sequência [de camadas]").
+    Forma CONFIRMADA com o usuário antes de implementar (AGENTS.md §24 --
+    TASKS.md já sinalizava que isso precisava de alinhamento antes de
+    tocar `selecionar_melhores_combinacoes`/`otimizar_portfolio`, que
+    permanecem intocados: este é um fluxo NOVO e paralelo, não uma
+    substituição):
+
+    1. **Sobrevivência**: `buscar_combinacoes_portfolio_com_filtros` (já
+       existente) -- todos os parâmetros de filtro dessa função
+       (dedupe/min_robos_ativos/margem_maxima/perda_diaria_maxima/
+       clusters) são repassados diretamente, nenhuma lógica nova aqui.
+    2. **Eficiência**: ranqueia os sobreviventes por `_eficiencia_rlt_mdd`
+       (RLT/|MDD|, computável dos campos que a camada 1 já calcula --
+       nenhuma fórmula nova) e mantém os `top_n_eficiencia` melhores.
+    3. **Robustez**: roda `vizinhanca_local` (já existente) em cada um
+       dos `top_n_eficiencia` e elimina quem tem a MÉDIA do
+       `rlt_acumulado` das vizinhas abaixo de
+       `(1 - tolerancia_robustez_pct/100) × RLT da própria base` --
+       "todas as vizinhas são ruins" vira "a média das vizinhas é ruim"
+       (agregação por média, não o mínimo -- o documento fala da carteira
+       E das vizinhas serem boas como afirmação coletiva, não de que
+       toda vizinha individual precise passar; usar o mínimo seria
+       eliminar quase tudo com uma única vizinha ruim de várias). Uma
+       base sem NENHUMA vizinha válida (`vizinhas` vazia) não é eliminada
+       por falta de evidência -- não há o que reprovar. Sem walk-forward
+       ainda (backlog separado), esta é a única evidência de robustez
+       disponível hoje.
+    4. **Simplicidade**: entre os sobreviventes da camada 3, ordena por
+       eficiência decrescente e, como critério de DESEMPATE, por total
+       de contratos (`sum(alocacao.values())`) crescente -- não uma
+       comparação de similaridade epsilon (isso já existe separadamente
+       em `fronteira_pareto`).
+
+    Cada camada expõe os avaliados E os sobreviventes (quando aplicável)
+    -- mesmo princípio de transparência de `buscar_combinacoes_portfolio_
+    com_filtros`/`fronteira_pareto` epsilon (nunca esconder o que foi
+    descartado): `camada1_sobrevivencia` (dict completo de
+    `buscar_combinacoes_portfolio_com_filtros`), `camada2_eficiencia`
+    (lista, cada resultado + `eficiencia_rlt_mdd`), `camada3_robustez`
+    (`{"avaliados": [...+ "media_rlt_vizinhas"/"robusto"...],
+    "sobreviventes": [...só os robustos...]}`), `camada4_simplicidade`
+    (lista final, cada resultado + `total_contratos`)."""
+    camada1 = buscar_combinacoes_portfolio_com_filtros(
+        diarios_referencia, margens_por_contrato, candidatos_contratos,
+        percentil_cauda=percentil_cauda, fracao_reserva_operacional=fracao_reserva_operacional,
+        increment=increment, usar_janela_comum=usar_janela_comum,
+        deduplicar_composicao=deduplicar_composicao, min_robos_ativos=min_robos_ativos,
+        margem_maxima=margem_maxima, perda_diaria_maxima=perda_diaria_maxima,
+        clusters=clusters, max_contratos_por_cluster=max_contratos_por_cluster,
+    )
+
+    camada2 = sorted(
+        (dict(r, eficiencia_rlt_mdd=_eficiencia_rlt_mdd(r["rlt_acumulado"], r["mdd"])) for r in camada1["resultados"]),
+        key=lambda r: r["eficiencia_rlt_mdd"], reverse=True,
+    )[:top_n_eficiencia]
+
+    avaliados_camada3 = []
+    for r in camada2:
+        viz = vizinhanca_local(
+            r["alocacao"], diarios_referencia, margens_por_contrato,
+            percentil_cauda=percentil_cauda, fracao_reserva_operacional=fracao_reserva_operacional,
+            increment=increment, usar_janela_comum=usar_janela_comum,
+            incluir_transferencias=incluir_transferencias_robustez,
+        )
+        vizinhas = viz["vizinhas"]
+        media_rlt_vizinhas = (
+            sum(v["rlt_acumulado"] for v in vizinhas) / len(vizinhas) if vizinhas else None
+        )
+        robusto = (
+            True if media_rlt_vizinhas is None
+            else bool(media_rlt_vizinhas >= r["rlt_acumulado"] * (1 - tolerancia_robustez_pct / 100))
+        )
+        avaliados_camada3.append(dict(r, media_rlt_vizinhas=media_rlt_vizinhas, robusto=robusto))
+
+    sobreviventes_camada3 = [r for r in avaliados_camada3 if r["robusto"]]
+
+    camada4 = sorted(
+        (dict(r, total_contratos=sum(r["alocacao"].values())) for r in sobreviventes_camada3),
+        key=lambda r: (-r["eficiencia_rlt_mdd"], r["total_contratos"]),
+    )
+
+    return {
+        "camada1_sobrevivencia": camada1,
+        "camada2_eficiencia": camada2,
+        "camada3_robustez": {"avaliados": avaliados_camada3, "sobreviventes": sobreviventes_camada3},
+        "camada4_simplicidade": camada4,
+    }
+
+
 def fronteira_pareto(
     resultados: list, eixo_retorno: str, eixo_risco: str,
     tolerancia_retorno_pct: float = 0.0, tolerancia_risco_pct: float = 0.0,
@@ -1237,3 +1543,146 @@ def fronteira_pareto(
         agrupada.append(dict(r, _agrupados=[]))
         representante = r
     return agrupada
+
+
+def _pesos_risco_inverso(largo_ref: pd.DataFrame, nomes: list) -> dict:
+    """Peso de cada robô proporcional a `1/desvio_padrão_diário`
+    (`metrics.desvio_padrao`) da sua série de referência, normalizado
+    para somar 1 -- "risco inverso", benchmark padrão (documento-fonte
+    §18/19: "contratos iguais" e "risco inverso" servem para descobrir
+    se a otimização complexa realmente agrega algo). Reusado tanto pelo
+    benchmark `risco_inverso` global quanto DENTRO de cada cluster em
+    `shortlist_portfolio`'s Handcrafted Risk."""
+    inv_vol = {nome: 1.0 / metrics.desvio_padrao(largo_ref[nome]) for nome in nomes}
+    soma = sum(inv_vol.values())
+    return {nome: v / soma for nome, v in inv_vol.items()}
+
+
+def shortlist_portfolio(
+    resultados: list,
+    diarios_referencia: dict,
+    margens_por_contrato: dict,
+    total_contratos_benchmark: int,
+    alocacao_atual: dict = None,
+    clusters: list = None,
+    eixo_retorno: str = "lucro_total",
+    eixo_risco: str = "mdd",
+    retorno_minimo: float = None,
+    risco_maximo: float = None,
+    percentil_cauda: int = 95,
+    fracao_reserva_operacional: float = 0.0,
+    increment: float = None,
+    usar_janela_comum: bool = True,
+) -> dict:
+    """Backlog de `prompts/otimizacao.pdf` §18 ("permitir ao usuário ver
+    se a otimização complexa realmente supera referências simples"),
+    fora dos épicos do PDF-fonte. Devolve um conjunto pequeno e NOMEADO
+    de candidatas em vez de uma única tabela ordenada por objetivo:
+
+    - `"minimum_risk"`: menor `eixo_risco` entre as combinações de
+      `resultados` cujo `eixo_retorno` é `>= retorno_minimo` (sem
+      filtro se `retorno_minimo` for `None`).
+    - `"growth"`: maior `eixo_retorno` entre as combinações cujo
+      `eixo_risco` é `>= risco_maximo` (sem filtro se `risco_maximo` for
+      `None`).
+    - `"balanced"`: o ponto de `fronteira_pareto(resultados, eixo_retorno,
+      eixo_risco)` mais próximo do canto ideal (máximo retorno E máximo
+      risco, ambos normalizados para `[0, 1]`) -- técnica padrão de
+      "knee point" em otimização multiobjetivo, não uma fórmula
+      inventada para este projeto.
+    - `"handcrafted_risk"` (só se `clusters` for informado): peso IGUAL
+      entre CLUSTERS ("um voto por cluster", não por robô -- evita que
+      vários robôs correlacionados dominem só por serem vários) e,
+      DENTRO de cada cluster, peso por risco inverso
+      (`_pesos_risco_inverso`) entre os membros; os pesos finais são
+      multiplicados por `total_contratos_benchmark` e arredondados.
+    - `"contratos_iguais"`: `total_contratos_benchmark` dividido
+      igualmente (arredondado) entre todos os robôs.
+    - `"risco_inverso"`: `total_contratos_benchmark` distribuído por
+      `_pesos_risco_inverso` GLOBAL (sem olhar clusters) -- distinto de
+      Handcrafted Risk propositalmente, para isolar o efeito de
+      considerar cluster ou não.
+    - `"carteira_atual"` (só se `alocacao_atual` for informado):
+      recalcula as métricas dessa alocação específica (a carteira que o
+      usuário já está rodando), para comparação direta com as demais.
+
+    **"Most Robust" deliberadamente NÃO implementado** -- o próprio
+    documento-fonte condiciona esse perfil a walk-forward existir
+    (§18: "melhor desempenho médio em walk-forward/stress/vizinhança/
+    degradação"), que ainda não existe neste projeto (só robustez local,
+    `vizinhanca_local`, já existe) -- decisão de escopo, não
+    esquecimento.
+
+    Cada valor do dicionário é `None` quando nenhuma combinação satisfaz
+    o filtro do perfil (`minimum_risk`/`growth`) ou quando a fronteira
+    está vazia (`balanced`) -- `resultados` vazio propaga `None` para
+    todos os perfis baseados nele, nunca inventa um substituto."""
+    nomes = list(diarios_referencia.keys())
+
+    def _avaliar(alocacao: dict) -> dict:
+        largo, margens_ativas = _sincronizar_alocacao(
+            alocacao, diarios_referencia, margens_por_contrato, usar_janela_comum,
+        )
+        if largo is None:
+            return None
+        return _metricas_de_alocacao(
+            alocacao, largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
+        )
+
+    shortlist = {}
+
+    validos_minimum_risk = [
+        r for r in resultados if retorno_minimo is None or r[eixo_retorno] >= retorno_minimo
+    ]
+    shortlist["minimum_risk"] = (
+        max(validos_minimum_risk, key=lambda r: r[eixo_risco]) if validos_minimum_risk else None
+    )
+
+    validos_growth = [r for r in resultados if risco_maximo is None or r[eixo_risco] >= risco_maximo]
+    shortlist["growth"] = max(validos_growth, key=lambda r: r[eixo_retorno]) if validos_growth else None
+
+    fronteira = fronteira_pareto(resultados, eixo_retorno, eixo_risco)
+    if fronteira:
+        retornos = [r[eixo_retorno] for r in fronteira]
+        riscos = [r[eixo_risco] for r in fronteira]
+        min_r, max_r = min(retornos), max(retornos)
+        min_k, max_k = min(riscos), max(riscos)
+
+        def _dist_ao_ideal(r: dict) -> float:
+            nr = (r[eixo_retorno] - min_r) / (max_r - min_r) if max_r > min_r else 1.0
+            nk = (r[eixo_risco] - min_k) / (max_k - min_k) if max_k > min_k else 1.0
+            return (1 - nr) ** 2 + (1 - nk) ** 2
+
+        shortlist["balanced"] = min(fronteira, key=_dist_ao_ideal)
+    else:
+        shortlist["balanced"] = None
+
+    largo_ref = sincronizar_portfolio(diarios_referencia)
+    if usar_janela_comum:
+        largo_ref = restringir_janela_comum(largo_ref)
+
+    if clusters is not None:
+        peso_por_cluster = 1.0 / len(clusters)
+        pesos_handcrafted = {}
+        for cluster in clusters:
+            pesos_cluster = _pesos_risco_inverso(largo_ref, cluster)
+            for nome in cluster:
+                pesos_handcrafted[nome] = peso_por_cluster * pesos_cluster[nome]
+        alocacao_handcrafted = {
+            nome: round(pesos_handcrafted.get(nome, 0.0) * total_contratos_benchmark) for nome in nomes
+        }
+        shortlist["handcrafted_risk"] = _avaliar(alocacao_handcrafted)
+
+    alocacao_igual = {nome: round(total_contratos_benchmark / len(nomes)) for nome in nomes}
+    shortlist["contratos_iguais"] = _avaliar(alocacao_igual)
+
+    pesos_risco_inverso = _pesos_risco_inverso(largo_ref, nomes)
+    alocacao_risco_inverso = {
+        nome: round(pesos_risco_inverso[nome] * total_contratos_benchmark) for nome in nomes
+    }
+    shortlist["risco_inverso"] = _avaliar(alocacao_risco_inverso)
+
+    if alocacao_atual is not None:
+        shortlist["carteira_atual"] = _avaliar(alocacao_atual)
+
+    return shortlist

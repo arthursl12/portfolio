@@ -1432,18 +1432,36 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   testa a grade completa de composição × escala de uma vez.
 
 ### Scores individuais separados (retorno / risco / diversificação)
-- [ ] Três scores por robô SEM somar em nota única (documento é
-  explícito: "não some imediatamente os três" -- combinar pesos é uma
-  convenção de produto que precisa ser decidida com o usuário, AGENTS.md
-  §8). Métricas de cada score em grande parte já existem soltas em
-  `report_data`/`metrics`/`drawdowns` para o modo Robô único -- o
-  trabalho novo é (a) calculá-las por robô dentro do contexto do
-  portfólio (por-contrato, mesma janela) e (b) apresentá-las como 3
-  números lado a lado, não uma combinação.
-- [ ] "EA possui função econômica própria ou duplica outro robô?" --
-  provavelmente decorre da correlação geral já calculada
-  (`correlacao_portfolio`) acima de um limiar a definir com o usuário,
-  não uma métrica nova.
+- [x] `portfolio.scores_individuais_portfolio(diarios, percentil_cauda,
+  fracao_melhores_dias, fracao_piores_dias, usar_janela_comum)` --
+  **decisão confirmada com o usuário** (AGENTS.md §24, para não inventar
+  uma fórmula de normalização/peso que ninguém pediu): em vez de reduzir
+  cada eixo a UM número, devolve as métricas BRUTAS de cada eixo,
+  agrupadas em 3 seções por robô -- nenhuma agregação nova.
+  - `retorno`: `lucro_liquido`, `expectativa_diaria`
+    (`metrics.expectancia`), `desvio_padrao_diario`
+    (`metrics.desvio_padrao`, proxy de "estabilidade"),
+    `resultado_sem_melhores_dias` (mesmo mecanismo de corte por quantil
+    de `metrics.var_historico`, no lado superior da série).
+  - `risco`: `mdd`, `es` (`metrics.expected_shortfall`), `pior_dia`,
+    `duracao_drawdown_max` (`drawdowns.time_under_water_max`),
+    `maior_sequencia_perdas` (`metrics.maior_sequencia`).
+  - `diversificacao`: `correlacao_media`, `correlacao_dias_negativos`
+    (`correlacao_perdas`), `coincidencia_piores_dias`
+    (`correlacao_piores_dias`), `contribuicao_drawdown_portfolio_pct`
+    (reusa `contribuicao_risco_por_robo`, não recalcula), e
+    `retorno_quando_outros_perdem` (`NaN` se os outros nunca perderam
+    juntos, nunca inventado como 0).
+  Verificado por script + 5 testes (incluindo uma garantia estrutural:
+  nenhuma chave além das 3 seções nomeadas, nenhum "score"/nota
+  combinada). Wireado em `app.py` como expander próprio, 3 tabelas
+  (Retorno/Risco/Diversificação).
+- [x] "EA possui função econômica própria ou duplica outro robô?" --
+  reusa `clusters_de_risco` já implementado (mesmo limiar de correlação
+  configurável no expander de correlação): robô sozinho no cluster =
+  função própria; robô num cluster com outros = candidato a redundante.
+  Coluna "Possível redundância" na tabela de diversificação em `app.py`
+  -- nenhuma métrica nova precisou ser inventada.
 
 ### Clusters de risco e limites por cluster
 - [x] `portfolio.clusters_de_risco(largo, limiar_correlacao=0.5)` --
@@ -1500,12 +1518,26 @@ nome ou já cobertas pela tarefa 10.4/10.8:
     por robô -- exigiria rodar `contribuicao_risco_por_robo` por
     combinação, o oposto de um filtro barato (só faria sentido numa fase
     de finalistas, não no funil inicial).
-- [ ] Funil de 4 camadas (sobrevivência → eficiência → robustez →
-  simplicidade) substituindo a escolha atual por objetivo único
-  (`selecionar_melhores_combinacoes` hoje ordena por UM critério:
-  RLT, MDD/limiar, ou lucro-com-limite). Isso é uma mudança de UX/fluxo
-  grande, não só uma função nova -- precisa de alinhamento antes de
-  tocar `selecionar_melhores_combinacoes`/`otimizar_portfolio`.
+- [x] `portfolio.funil_selecao_portfolio(...)` -- **forma confirmada com
+  o usuário antes de implementar** (AGENTS.md §24): fluxo NOVO e
+  paralelo (`selecionar_melhores_combinacoes`/`otimizar_portfolio`
+  permanecem intocados, nenhuma substituição). Camada 1 (sobrevivência)
+  reusa `buscar_combinacoes_portfolio_com_filtros` sem lógica nova;
+  camada 2 (eficiência) ranqueia por `_eficiencia_rlt_mdd` (RLT/|MDD|,
+  campos já existentes) e mantém os `top_n_eficiencia` melhores; camada
+  3 (robustez) roda `vizinhanca_local` em cada um e elimina quem tem a
+  MÉDIA do RLT das vizinhas abaixo de `(1 - tolerancia_robustez_pct%) ×
+  RLT da base` -- sem walk-forward ainda, é a única evidência de
+  robustez disponível hoje; camada 4 (simplicidade) ordena por
+  eficiência e desempata por menos contratos totais (não uma
+  comparação de similaridade epsilon -- isso já existe na Fronteira de
+  Pareto). Cada camada expõe avaliados E sobreviventes -- nunca esconde
+  o que foi descartado. Verificado por script + 3 testes e via `AppTest`
+  contra dados reais (91→10→9→9 combinações através das 4 camadas,
+  1 candidata eliminada na robustez por afundar de RLT 4,36 para média
+  de vizinhas 3,34, abaixo da tolerância de 20%). Wireado em `app.py`
+  como expander próprio, reusando a MESMA configuração de filtros já
+  montada no expander de busca com filtros.
 
 ### Curva de limiares (em vez de um único MDD-alvo)
 - [x] `portfolio.curva_limiares_mdd(resultados, limites_mdd)` -- para
@@ -1550,26 +1582,55 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   contratos já configurado de cada robô -- verificado via `AppTest`.
 
 ### Monte Carlo em duas fases + esquemas adicionais
-- [ ] Restringir Monte Carlo (`robustez_portfolio`) aos ~10-20 finalistas
-  de uma busca, não a toda a grade -- hoje é chamado manualmente sobre
-  UM `largo` fixo na UI, não integrado ao loop de `buscar_combinacoes_portfolio`.
-  Esquema B (bootstrap por blocos) já implementado (ver "já implementado"
-  acima). Faltam:
-  - [ ] Esquema A (embaralhamento simples dos dias, sem criar blocos).
-  - [ ] Esquema C (choques: pior dia repetido, slippage dobrado, perda
-    simultânea de todos os robôs, correlação elevada artificialmente).
-  - [ ] Esquema D (degradação de edge -- expectativa de um robô cai
-    25%/50%/zero/negativa a partir de um ponto aleatório e permanece
-    deteriorada). Já existe uma versão disso no modo Robô único
-    (`tradefolio.deterioracao`, Épico 8.3) mas foi DELIBERADAMENTE não
-    portada para o portfólio (ver Tarefa 10.3: "colunas sem significado
-    agregado coerente entre robôs heterogêneos") -- reabrir essa decisão
-    se o usuário quiser esse cenário no nível de portfólio.
-- [ ] CDaR (Conditional Drawdown at Risk -- média dos drawdowns nos
-  piores percentis simulados) e probabilidade de recuperação em N
-  pregões, ambos citados no documento (seção 12) e ausentes de
-  `robustez_portfolio` hoje (que já tem percentis de MDD e probabilidade
-  de estouro de limiar/margem, mas não CDaR nem P(recuperar) explícitos).
+- [x] `portfolio.robustez_dos_finalistas(diarios_referencia,
+  margens_por_contrato, finalistas, esquema, ..., choques)` -- roda
+  Monte Carlo só numa lista pequena de finalistas (tipicamente
+  `funil_selecao_portfolio(...)['camada4_simplicidade']`), não na grade
+  inteira. `robustez_portfolio` permanece INTOCADA (continua servindo o
+  uso manual de um `largo` só, já existente na UI) -- esta é uma função
+  nova que reusa `_sincronizar_alocacao` + as peças de
+  `tradefolio.monte_carlo` diretamente. Verificado por equivalência
+  (mesma seed reproduz exatamente o que sincronizar a alocação e chamar
+  `circular_block_bootstrap`/`resumo_trajetorias` à mão daria) + 4
+  testes. Wireado em `app.py` dentro do expander do funil, como
+  subseção "Monte Carlo nos finalistas (fase 2)" -- verificado via
+  `AppTest` contra dados reais, pipeline completo busca→funil→MC.
+- [x] `monte_carlo.embaralhamento_dias(dados, n_trajetorias, seed,
+  incluir_dias_sem_operacao)` -- esquema A: permutação SEM reposição do
+  mesmo conjunto de dias (distinto de `circular_block_bootstrap
+  (tamanho_bloco=1)`, que reamostra COM reposição). Não recebe
+  `horizonte` -- sempre igual ao tamanho da amostra, por construção de
+  uma permutação. Verificado com 4 testes (incluindo reprodutibilidade
+  por seed e exclusão de dias sem operação).
+- [x] `monte_carlo.aplicar_choque(resultado, dados, tipo, seed)` --
+  esquema C, **parcial por decisão confirmada com o usuário** (AGENTS.md
+  §24): só `"pior_dia_repetido"` (a linha histórica REAL do pior dia
+  combinado) e `"perda_simultanea"` (dia sintético com o pior de CADA
+  robô independentemente) implementados. "Slippage dobrado" (mesma
+  lacuna que excluiu o esquema D -- `bruto`/`custo` não separáveis na
+  série agregada) e "correlação elevada artificialmente" (exigiria
+  inventar uma técnica de covariância/cópula) ficam de fora, mesmo
+  raciocínio já documentado para o esquema D abaixo. Recebe um
+  `ResultadoBootstrap` já simulado (de `circular_block_bootstrap`/
+  `embaralhamento_dias`) e substitui um dia por trajetória -- é uma
+  avaria sobre uma simulação de base, não um esquema de amostragem
+  próprio. Verificado com 4 testes.
+  - [ ] Esquema D (degradação de edge) -- **decisão reconfirmada com o
+    usuário**: continua fora, mesmo raciocínio de antes (colunas sem
+    significado agregado coerente entre robôs heterogêneos).
+- [x] CDaR (`monte_carlo.resumo_trajetorias(..., confianca_cdar=0.95)`)
+  -- `metrics.expected_shortfall` aplicado à distribuição de MDD por
+  trajetória em vez de à distribuição de retornos (mesma mecânica,
+  generalização padrão do mercado, não uma fórmula nova). E
+  probabilidade de recuperação (`horizontes_recuperacao=(60, 120)`,
+  padrão do documento-fonte) -- fração das trajetórias que retornam ao
+  pico anterior ao pior drawdown em até N pregões; uma trajetória cujo
+  fundo é o último dia (sem dias seguintes) conta como NÃO recuperada.
+  Ambos parâmetros novos e opcionais em `resumo_trajetorias` -- mesmos
+  valores de antes continuam idênticos quando não usados (compatibilidade
+  com os testes já existentes). Verificado com 3 testes usando
+  trajetórias construídas à mão (mesmo estilo dos testes já existentes
+  do módulo).
 
 ### Epsilon-Pareto (tolerância econômica) e agrupamento
 - [x] `fronteira_pareto(..., tolerancia_retorno_pct=0.0, tolerancia_risco_pct=0.0)`
@@ -1677,17 +1738,34 @@ nome ou já cobertas pela tarefa 10.4/10.8:
   degradou (mencionado no documento como motivação direta).
 
 ### Shortlist final com perfis nomeados
-- [ ] Em vez de uma única tabela ordenada por objetivo, devolver um
-  conjunto pequeno e nomeado de candidatas: Minimum Risk, Balanced
-  (joelho da fronteira), Growth, Most Robust (melhor médio em
-  walk-forward/stress/vizinhança/degradação -- depende dos itens acima
-  existirem primeiro), Handcrafted Risk (alocação simples por cluster,
-  como benchmark), mais três benchmarks fixos sempre incluídos: carteira
-  atual do usuário, contratos iguais entre robôs, risco inverso
-  (1/volatilidade). Propósito explícito do documento: permitir ao
-  usuário ver se a otimização complexa realmente supera essas
-  referências simples -- não implementar a parte "Most Robust" antes dos
-  itens de robustez local/walk-forward existirem.
+- [x] `portfolio.shortlist_portfolio(resultados, diarios_referencia,
+  margens_por_contrato, total_contratos_benchmark, ...)` -- devolve um
+  conjunto pequeno e nomeado em vez de uma única tabela ordenada:
+  - `minimum_risk`: menor risco entre as combinações com retorno `>=
+    retorno_minimo`.
+  - `growth`: maior retorno entre as combinações com risco `>=
+    risco_maximo`.
+  - `balanced`: ponto de `fronteira_pareto` mais próximo do canto ideal
+    normalizado (técnica padrão de "knee point" em otimização
+    multiobjetivo, não uma fórmula inventada).
+  - `handcrafted_risk` (só se `clusters` informado): peso IGUAL entre
+    CLUSTERS ("um voto por cluster", não por robô) e, dentro de cada
+    cluster, risco inverso entre os membros -- reusa `clusters_de_risco`
+    já existente. Verificado: com os 3 robôs reais (clusters todos de 1
+    membro, correlação real baixa), Handcrafted Risk colapsa
+    EXATAMENTE em Contratos Iguais (3,3,3 contratos reais/12 no
+    benchmark) -- demonstra o mecanismo "um voto por cluster" mesmo no
+    caso degenerado.
+  - `contratos_iguais`/`risco_inverso`: os dois benchmarks fixos que
+    não dependem de cluster.
+  - `carteira_atual` (só se `alocacao_atual` informado): recalcula a
+    alocação que o usuário já está rodando, para comparação direta.
+  **"Most Robust" deliberadamente NÃO implementado** -- continua
+  condicionado a walk-forward existir (que ainda não existe; só
+  robustez local, `vizinhanca_local`, existe). Verificado por script +
+  6 testes. Wireado em `app.py` como expander próprio "Shortlist final
+  (perfis nomeados)", reusando os resultados já calculados pela busca
+  discreta -- verificado via `AppTest` contra dados reais.
 
 ### Regra de decisão / scoring pós-filtro
 - [ ] O documento é explícito que isso "não é uma fórmula universal" e

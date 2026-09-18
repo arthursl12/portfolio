@@ -55,12 +55,16 @@ from tradefolio.portfolio import (
     correlacao_volatilidade_alta,
     curva_limiares_mdd,
     fronteira_pareto,
+    funil_selecao_portfolio,
     limiar_agregado_portfolio,
     metricas_agregadas,
     restringir_janela_comum,
     rlt_e_risco_portfolio,
+    robustez_dos_finalistas,
     robustez_portfolio,
+    scores_individuais_portfolio,
     selecionar_melhores_combinacoes,
+    shortlist_portfolio,
     sincronizar_operou,
     sincronizar_portfolio,
     vizinhanca_local,
@@ -663,6 +667,70 @@ def rodar_modo_portfolio():
                 for nome, c in por_robo_risco.items()
             }).T)
 
+        with st.expander("Scores individuais separados (retorno / risco / diversificação)"):
+            st.caption(
+                "Backlog de prompts/otimizacao.pdf §3 -- \"não some imediatamente os três em uma "
+                "nota arbitrária\". Decisão confirmada com o usuário: em vez de reduzir cada eixo a "
+                "UM número (exigiria inventar uma fórmula de normalização/peso que ninguém pediu), "
+                "as três tabelas abaixo mostram as métricas BRUTAS de cada eixo, lado a lado -- "
+                "nenhuma agregação nova."
+            )
+            fracao_melhores_dias = st.number_input(
+                "Fração dos melhores dias a excluir (\"resultado sem os melhores dias\")",
+                min_value=0.01, max_value=0.50, value=0.05, step=0.01, key="portfolio_scores_fracao_melhores",
+            )
+            scores = scores_individuais_portfolio(
+                diarios, percentil_cauda=percentil_cauda, fracao_melhores_dias=fracao_melhores_dias,
+                usar_janela_comum=usar_janela_comum,
+            )
+            clusters_para_redundancia = st.session_state.get("portfolio_clusters_risco") or []
+            redundante = {
+                nome: len(next((c for c in clusters_para_redundancia if nome in c), [nome])) > 1
+                for nome in scores
+            }
+
+            st.markdown("**Retorno**")
+            st.table(pd.DataFrame({
+                nome: {
+                    "Lucro líquido": fmt(s["retorno"]["lucro_liquido"], moeda=True),
+                    "Expectativa diária": fmt(s["retorno"]["expectativa_diaria"], moeda=True),
+                    "Desvio padrão diário": fmt(s["retorno"]["desvio_padrao_diario"], moeda=True),
+                    f"Resultado sem os {fmt(fracao_melhores_dias*100)}% melhores dias": fmt(s["retorno"]["resultado_sem_melhores_dias"], moeda=True),
+                }
+                for nome, s in scores.items()
+            }).T)
+
+            st.markdown("**Risco**")
+            st.table(pd.DataFrame({
+                nome: {
+                    "MDD": fmt(s["risco"]["mdd"], moeda=True),
+                    f"ES{percentil_cauda}": fmt(s["risco"]["es"], moeda=True),
+                    "Pior dia": fmt(s["risco"]["pior_dia"], moeda=True),
+                    "Duração máx. de drawdown (pregões)": s["risco"]["duracao_drawdown_max"],
+                    "Maior sequência de perdas": s["risco"]["maior_sequencia_perdas"],
+                }
+                for nome, s in scores.items()
+            }).T)
+
+            st.markdown("**Diversificação**")
+            st.caption(
+                "\"EA possui função econômica própria ou duplica outro robô?\" -- reusa os clusters "
+                "de risco já detectados acima (correlação geral, limiar ajustável): robô sozinho no "
+                "seu cluster = função própria; robô num cluster com outros = candidato a redundante "
+                "(marcado abaixo se o expander de correlação já foi aberto nesta sessão)."
+            )
+            st.table(pd.DataFrame({
+                nome: {
+                    "Correlação média": fmt(s["diversificacao"]["correlacao_media"], 4),
+                    "Correlação nos dias negativos": fmt(s["diversificacao"]["correlacao_dias_negativos"], 4),
+                    "Coincidência nos piores dias": fmt(s["diversificacao"]["coincidencia_piores_dias"], 4),
+                    "Contribuição ao drawdown do portfólio": fmt(s["diversificacao"]["contribuicao_drawdown_portfolio_pct"]) + "%",
+                    "Retorno quando os outros perdem": fmt(s["diversificacao"]["retorno_quando_outros_perdem"], moeda=True),
+                    "Possível redundância (mesmo cluster)": "Sim" if redundante.get(nome) else "Não",
+                }
+                for nome, s in scores.items()
+            }).T)
+
         with st.expander("Otimização de portfólio (busca discreta)"):
             st.caption(
                 "Tarefa 10.8 -- busca discreta (não otimização contínua, pedido explícito do "
@@ -1185,6 +1253,222 @@ def rodar_modo_portfolio():
                     f"{len(resultado_vizinhanca['vizinhas'])} vizinhas avaliadas (algumas podem ter "
                     "sido omitidas por não terem janela comum ou ficarem degeneradas -- 0 contratos "
                     "em todos os robôs)."
+                )
+
+        with st.expander("Funil de seleção (4 camadas)"):
+            st.caption(
+                "Backlog de prompts/otimizacao.pdf §6 -- \"não escolheria entre 'máximo RLT' e "
+                "'mínimo MDD'. Usaria uma sequência\": (1) sobrevivência -- reusa os mesmos filtros "
+                "configurados acima em \"busca com filtros de sobrevivência\"; (2) eficiência -- "
+                "ranqueia por RLT/|MDD| e mantém os N melhores; (3) robustez -- roda a vizinhança "
+                "±1 (já existente) em cada um, elimina quem a MÉDIA das vizinhas afunda mais que a "
+                "tolerância abaixo da base (sem walk-forward ainda, é a única evidência de robustez "
+                "disponível); (4) simplicidade -- desempate por menos contratos totais. Cada camada "
+                "mostra os avaliados E os sobreviventes, nunca esconde o que foi descartado."
+            )
+            colfu1, colfu2 = st.columns(2)
+            top_n_eficiencia = colfu1.number_input(
+                "Quantos avançam da camada 2 (eficiência) para a 3 (robustez)",
+                min_value=1, max_value=100, value=20, step=1, key="portfolio_funil_top_n",
+                help="Cada um roda uma vizinhança ±1 completa na camada 3 -- valores altos ficam mais lentos.",
+            )
+            tolerancia_robustez_pct = colfu2.number_input(
+                "Tolerância de robustez (%) -- média das vizinhas não pode afundar mais que isto",
+                min_value=0.0, value=20.0, step=5.0, key="portfolio_funil_tolerancia",
+            )
+            incluir_transferencias_robustez = st.checkbox(
+                "Incluir transferências na checagem de robustez", value=True,
+                key="portfolio_funil_transferencias",
+            )
+
+            if st.button("Rodar funil", icon=":material/filter_list:"):
+                with st.spinner("Calculando (camada 3 roda uma vizinhança por candidato)..."):
+                    try:
+                        resultado_funil = funil_selecao_portfolio(
+                            diarios_referencia, margens_por_contrato, candidatos_contratos,
+                            percentil_cauda=percentil_cauda,
+                            fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
+                            increment=increment, usar_janela_comum=usar_janela_comum,
+                            deduplicar_composicao=deduplicar_composicao,
+                            min_robos_ativos=int(min_robos_ativos), margem_maxima=margem_maxima_filtro,
+                            perda_diaria_maxima=perda_diaria_maxima_filtro,
+                            clusters=clusters_para_busca, max_contratos_por_cluster=max_cluster_para_busca,
+                            top_n_eficiencia=int(top_n_eficiencia),
+                            tolerancia_robustez_pct=tolerancia_robustez_pct,
+                            incluir_transferencias_robustez=incluir_transferencias_robustez,
+                        )
+                    except ValueError as erro:
+                        st.error(str(erro))
+                    else:
+                        st.session_state["portfolio_resultado_funil"] = resultado_funil
+
+            resultado_funil = st.session_state.get("portfolio_resultado_funil")
+            if resultado_funil is None:
+                st.info("Clique em \"Rodar funil\" para calcular.")
+            else:
+                camada1 = resultado_funil["camada1_sobrevivencia"]
+                camada2 = resultado_funil["camada2_eficiencia"]
+                camada3 = resultado_funil["camada3_robustez"]
+                camada4 = resultado_funil["camada4_simplicidade"]
+
+                colfr1, colfr2, colfr3, colfr4 = st.columns(4)
+                colfr1.metric("Camada 1: sobrevivência", camada1["n_avaliadas"])
+                colfr2.metric("Camada 2: eficiência", len(camada2))
+                colfr3.metric("Camada 3: robustez", len(camada3["sobreviventes"]))
+                colfr4.metric("Camada 4: final", len(camada4))
+
+                st.markdown("**Camada 4 -- resultado final (ordenado por eficiência, desempate por menos contratos)**")
+                if not camada4:
+                    st.warning("Nenhuma combinação sobreviveu a todas as camadas -- afrouxe os filtros/tolerância acima.")
+                else:
+                    st.table(pd.DataFrame([
+                        {
+                            **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                            "Total contratos": r["total_contratos"],
+                            "RLT": fmt(r["rlt_acumulado"], 4),
+                            "MDD": fmt(r["mdd"], moeda=True),
+                            "Eficiência (RLT/|MDD|)": fmt(r["eficiencia_rlt_mdd"], 6),
+                            "Média RLT vizinhas": fmt(r["media_rlt_vizinhas"], 4) if r["media_rlt_vizinhas"] is not None else "--",
+                        }
+                        for r in camada4
+                    ]))
+
+                with st.expander(f"Ver os {len(camada3['avaliados'])} avaliados na camada 3 (robustez) -- inclui os eliminados"):
+                    st.table(pd.DataFrame([
+                        {
+                            **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                            "RLT (base)": fmt(r["rlt_acumulado"], 4),
+                            "Média RLT vizinhas": fmt(r["media_rlt_vizinhas"], 4) if r["media_rlt_vizinhas"] is not None else "--",
+                            "Robusto": "Sim" if r["robusto"] else "Não",
+                        }
+                        for r in camada3["avaliados"]
+                    ]))
+
+                if camada4:
+                    st.markdown("**Monte Carlo nos finalistas (fase 2 -- só nos sobreviventes acima)**")
+                    st.caption(
+                        "Backlog de prompts/otimizacao.pdf §10 -- \"o Monte Carlo entra DEPOIS da "
+                        "triagem, não para rodar profundamente em todas as combinações\". Roda só "
+                        "nos poucos sobreviventes da camada 4, não na grade inteira."
+                    )
+                    colmc_f1, colmc_f2, colmc_f3 = st.columns(3)
+                    esquema_mc_finalistas = colmc_f1.selectbox(
+                        "Esquema", ["Bootstrap por blocos", "Embaralhamento simples"],
+                        key="portfolio_funil_mc_esquema",
+                    )
+                    n_trajetorias_finalistas = colmc_f2.number_input(
+                        "Trajetórias por finalista", min_value=100, max_value=20000, value=1000, step=100,
+                        key="portfolio_funil_mc_n_trajetorias",
+                    )
+                    seed_finalistas = colmc_f3.number_input(
+                        "Seed (vazio = aleatória)", min_value=0, value=None, step=1,
+                        key="portfolio_funil_mc_seed",
+                    )
+                    choques_finalistas = st.multiselect(
+                        "Choques (esquema C parcial)",
+                        ["pior_dia_repetido", "perda_simultanea"],
+                        key="portfolio_funil_mc_choques",
+                        help="\"slippage dobrado\" e \"correlação elevada artificialmente\" ficam de "
+                             "fora -- mesmo raciocínio que excluiu a degradação de edge (esquema D).",
+                    )
+
+                    if st.button("Rodar Monte Carlo nos finalistas", icon=":material/science:"):
+                        with st.spinner(f"Rodando Monte Carlo em {len(camada4)} finalistas..."):
+                            resultado_mc_finalistas = robustez_dos_finalistas(
+                                diarios_referencia, margens_por_contrato, camada4,
+                                esquema="bloco" if esquema_mc_finalistas == "Bootstrap por blocos" else "embaralhamento",
+                                tamanho_bloco=tamanho_bloco_pf, n_trajetorias=int(n_trajetorias_finalistas),
+                                horizonte=int(horizonte_pf), seed=int(seed_finalistas) if seed_finalistas is not None else None,
+                                incluir_dias_sem_operacao=incluir_sem_operacao_pf, usar_janela_comum=usar_janela_comum,
+                                choques=choques_finalistas,
+                            )
+                        st.session_state["portfolio_resultado_mc_finalistas"] = resultado_mc_finalistas
+
+                    resultado_mc_finalistas = st.session_state.get("portfolio_resultado_mc_finalistas")
+                    if resultado_mc_finalistas:
+                        st.table(pd.DataFrame([
+                            {
+                                **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                                "Lucro P50": fmt(r["lucro_p50"], moeda=True),
+                                "MDD P95": fmt(r["mdd_p95"], moeda=True),
+                                "CDaR 95": fmt(r["cdar_95"], moeda=True),
+                                "P(recup. 60p)": fmt(r["probabilidade_recuperacao_60"] * 100) + "%",
+                                "P(prejuízo)": fmt(r["probabilidade_prejuizo"] * 100) + "%",
+                            }
+                            for r in resultado_mc_finalistas
+                        ]))
+
+        with st.expander("Shortlist final (perfis nomeados)"):
+            st.caption(
+                "Backlog de prompts/otimizacao.pdf §18 -- \"permitir ao usuário ver se a "
+                "otimização complexa realmente supera referências simples\". Em vez de uma única "
+                "tabela ordenada, um conjunto pequeno e nomeado: Minimum Risk, Growth, Balanced "
+                "(joelho da Fronteira de Pareto), Handcrafted Risk (peso igual por CLUSTER, não "
+                "por robô -- evita que vários robôs correlacionados dominem só por serem vários), "
+                "mais os benchmarks fixos Carteira atual / Contratos iguais / Risco inverso. "
+                "\"Most Robust\" deliberadamente não incluído -- depende de walk-forward, que ainda "
+                "não existe neste projeto."
+            )
+            resultados_para_shortlist = st.session_state.get("portfolio_resultados_busca")
+            if resultados_para_shortlist is None:
+                st.info(
+                    "Rode a \"Otimização de portfólio (busca discreta)\" acima primeiro -- a "
+                    "shortlist reusa esses resultados, não recalcula nada."
+                )
+            else:
+                total_atual = sum(resumo_robos.get(nome, {}).get("n_contratos", 0) for nome in diarios_referencia)
+                colsl1, colsl2, colsl3 = st.columns(3)
+                total_contratos_benchmark = colsl1.number_input(
+                    "Total de contratos (benchmarks)", min_value=1, value=max(total_atual, 1), step=1,
+                    key="portfolio_shortlist_total",
+                )
+                retorno_minimo_sl = colsl2.number_input(
+                    "Retorno mínimo (Minimum Risk, vazio = sem filtro)", value=None, step=1000.0,
+                    key="portfolio_shortlist_retorno_minimo",
+                )
+                risco_maximo_sl = colsl3.number_input(
+                    "Risco máximo (Growth, R$ negativo, vazio = sem filtro)", max_value=0.0, value=None,
+                    step=500.0, key="portfolio_shortlist_risco_maximo",
+                )
+                clusters_para_shortlist = st.session_state.get("portfolio_clusters_risco")
+                alocacao_atual_sl = {
+                    nome: resumo_robos.get(nome, {}).get("n_contratos", 0) for nome in diarios_referencia
+                }
+
+                shortlist = shortlist_portfolio(
+                    resultados_para_shortlist, diarios_referencia, margens_por_contrato,
+                    total_contratos_benchmark=int(total_contratos_benchmark),
+                    alocacao_atual=alocacao_atual_sl, clusters=clusters_para_shortlist,
+                    retorno_minimo=retorno_minimo_sl, risco_maximo=risco_maximo_sl,
+                    percentil_cauda=percentil_cauda, fracao_reserva_operacional=fracao_reserva_operacional_pct / 100,
+                    increment=increment, usar_janela_comum=usar_janela_comum,
+                )
+
+                rotulos_perfis = {
+                    "carteira_atual": "Carteira atual",
+                    "minimum_risk": "Minimum Risk",
+                    "balanced": "Balanced",
+                    "growth": "Growth",
+                    "handcrafted_risk": "Handcrafted Risk",
+                    "contratos_iguais": "Contratos iguais",
+                    "risco_inverso": "Risco inverso",
+                }
+                linhas_shortlist = []
+                for chave, rotulo in rotulos_perfis.items():
+                    r = shortlist.get(chave)
+                    if r is None:
+                        continue
+                    linhas_shortlist.append({
+                        "Perfil": rotulo,
+                        **{f"Contratos {nome}": v for nome, v in r["alocacao"].items()},
+                        "Lucro": fmt(r["lucro_total"], moeda=True),
+                        "MDD": fmt(r["mdd"], moeda=True),
+                        "RLT": fmt(r["rlt_acumulado"], 4),
+                    })
+                st.table(pd.DataFrame(linhas_shortlist).set_index("Perfil"))
+                st.caption(
+                    "Handcrafted Risk só aparece se o expander \"Correlação entre robôs\" já "
+                    "detectou clusters acima."
                 )
 
         with st.expander("Robustez (Monte Carlo) do portfólio"):

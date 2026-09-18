@@ -59,18 +59,23 @@ from tradefolio.portfolio import (
     clusters_de_risco,
     curva_limiares_mdd,
     fronteira_pareto,
+    funil_selecao_portfolio,
     limiar_agregado_portfolio,
     metricas_agregadas,
     otimizar_portfolio,
     restringir_janela_comum,
+    robustez_dos_finalistas,
     robustez_portfolio,
+    scores_individuais_portfolio,
     selecionar_melhores_combinacoes,
+    shortlist_portfolio,
     rlt_e_risco_portfolio,
     serie_combinada,
     sincronizar_operou,
     sincronizar_portfolio,
     vizinhanca_local,
 )
+from tradefolio.monte_carlo import circular_block_bootstrap, resumo_trajetorias
 from tradefolio.report_data import montar_dataframe_diario
 
 
@@ -526,6 +531,85 @@ def test_contribuicao_risco_por_robo_uniao_explicita_nao_deixa_nan_vazar():
         assert all(x == x for x in v.values())  # nenhum NaN (x != x só é True para NaN)
 
 
+# --- Scores individuais separados (backlog de prompts/otimizacao.pdf §3,
+# fora dos épicos do PDF-fonte) --------------------------------------------
+#
+# "Não some imediatamente os três [scores] em uma nota arbitrária" --
+# decisão CONFIRMADA com o usuário (AGENTS.md §24): em vez de reduzir
+# cada eixo (retorno/risco/diversificação) a UM número (o que exigiria
+# inventar uma fórmula de normalização/peso não pedida por ninguém),
+# `scores_individuais_portfolio` devolve as métricas BRUTAS de cada eixo,
+# agrupadas em 3 seções por robô -- nenhuma agregação nova, só reuso do
+# que já existe (`metrics`/`drawdowns`/`correlacao_*`/
+# `contribuicao_risco_por_robo`) organizado pelo eixo que o documento
+# atribui a cada métrica (§3):
+# - retorno: lucro líquido, expectativa diária, desvio padrão diário
+#   ("estabilidade"), resultado excluindo os `fracao_melhores_dias`
+#   melhores dias (mesmo mecanismo de corte por quantil de
+#   `metrics.var_historico`, só no lado superior da série).
+# - risco: MDD, ES, pior dia, duração máxima de drawdown, maior
+#   sequência de perdas.
+# - diversificação: correlação média, correlação nos dias negativos
+#   (`correlacao_perdas`), coincidência nos piores dias
+#   (`correlacao_piores_dias`), contribuição ao drawdown do portfólio
+#   (reusa `contribuicao_risco_por_robo`, não recalcula), retorno médio
+#   quando os OUTROS robôs (combinados) perderam.
+# Valores conferidos por script antes destes testes.
+
+_PARAMS_SCORES = dict(percentil_cauda=95)
+
+
+def test_scores_individuais_portfolio_retorno():
+    diarios = _diarios_reais()
+    scores = scores_individuais_portfolio(diarios, **_PARAMS_SCORES)
+
+    resgat = scores["resgat"]["retorno"]
+    assert resgat["lucro_liquido"] == pytest.approx(12962.0, abs=1e-2)
+    assert resgat["expectativa_diaria"] == pytest.approx(41.544871794871796, abs=1e-6)
+    assert resgat["desvio_padrao_diario"] == pytest.approx(345.3259859397448, abs=1e-4)
+    assert resgat["resultado_sem_melhores_dias"] == pytest.approx(-1638.0, abs=1e-2)
+
+
+def test_scores_individuais_portfolio_risco():
+    diarios = _diarios_reais()
+    scores = scores_individuais_portfolio(diarios, **_PARAMS_SCORES)
+
+    gridhedge = scores["gridhedge"]["risco"]
+    assert gridhedge["mdd"] == pytest.approx(-3141.0600000000013, abs=1e-2)
+    assert gridhedge["es"] == pytest.approx(-751.565625, abs=1e-2)
+    assert gridhedge["pior_dia"] == pytest.approx(-783.49, abs=1e-2)
+    assert gridhedge["duracao_drawdown_max"] == 39
+    assert gridhedge["maior_sequencia_perdas"] == 4
+
+
+def test_scores_individuais_portfolio_diversificacao():
+    diarios = _diarios_reais()
+    scores = scores_individuais_portfolio(diarios, **_PARAMS_SCORES)
+
+    romanos2 = scores["romanos2"]["diversificacao"]
+    assert romanos2["correlacao_media"] == pytest.approx(0.018617651691687505, abs=1e-5)
+    assert romanos2["correlacao_dias_negativos"] == pytest.approx(-0.2987707592823811, abs=1e-5)
+    assert romanos2["coincidencia_piores_dias"] == pytest.approx(-0.3095429267867986, abs=1e-5)
+    assert romanos2["contribuicao_drawdown_portfolio_pct"] == pytest.approx(17.47332959011791, abs=1e-4)
+    assert romanos2["retorno_quando_outros_perdem"] == pytest.approx(18.641666666666666, abs=1e-6)
+
+
+def test_scores_individuais_portfolio_nao_combina_em_nota_unica():
+    # Garantia estrutural do pedido do usuário: nenhuma chave de nível
+    # "robô" além das 3 seções nomeadas -- em particular, nenhum "score"
+    # ou "nota" combinada.
+    diarios = _diarios_reais()
+    scores = scores_individuais_portfolio(diarios, **_PARAMS_SCORES)
+    for por_robo in scores.values():
+        assert set(por_robo.keys()) == {"retorno", "risco", "diversificacao"}
+
+
+def test_scores_individuais_portfolio_exige_ao_menos_2_robos():
+    diarios = {"resgat": _diarios_reais()["resgat"]}
+    with pytest.raises(ValueError, match="2"):
+        scores_individuais_portfolio(diarios)
+
+
 # --- Tarefa 10.8: otimização de portfólio (busca discreta) --------------
 #
 # lâmina ideal.pdf §13/tarefas e épicos.pdf tarefa 10.8: busca discreta
@@ -834,6 +918,307 @@ def test_buscar_combinacoes_portfolio_com_filtros_excede_limite_levanta_erro():
         buscar_combinacoes_portfolio_com_filtros(
             diarios, _MARGENS_POR_CONTRATO_10_8, candidatos_grandes,
         )
+
+
+# --- Funil de seleção em 4 camadas (backlog de prompts/otimizacao.pdf §6,
+# fora dos épicos do PDF-fonte) --------------------------------------------
+#
+# "Eu não escolheria entre 'máximo RLT' e 'mínimo MDD'. Usaria uma
+# sequência [de camadas]." Forma CONFIRMADA com o usuário antes de
+# implementar (AGENTS.md §24, TASKS.md já sinalizava "precisa de
+# alinhamento antes de tocar"):
+#   1. sobrevivência: reusa `buscar_combinacoes_portfolio_com_filtros`
+#      (já existe, nenhuma lógica nova aqui).
+#   2. eficiência: ranqueia os sobreviventes por RLT/|MDD| (computável
+#      dos campos já existentes, nenhuma fórmula nova) e mantém os
+#      `top_n_eficiencia` melhores.
+#   3. robustez: roda `vizinhanca_local` (já existe) em cada um dos
+#      `top_n_eficiencia`, elimina quem tem a MÉDIA do RLT das vizinhas
+#      abaixo de `(1 - tolerancia_robustez_pct/100) × RLT da base` --
+#      "todas as vizinhas ruins" vira "média das vizinhas ruim" (critério
+#      de agregação, não literal do documento, mas a leitura mais direta
+#      de "a carteira E as vizinhas são boas" como afirmação coletiva).
+#      Sem walk-forward ainda (backlog separado), esta é a única
+#      evidência de robustez disponível hoje.
+#   4. simplicidade: entre os sobreviventes da camada 3, ordena por
+#      eficiência decrescente e, como desempate, por total de contratos
+#      crescente -- não uma comparação de similaridade epsilon (isso já
+#      existe separadamente na Fronteira de Pareto).
+# Cada camada expõe os avaliados E os sobreviventes -- mesmo princípio
+# de transparência já usado nos filtros de sobrevivência e no
+# epsilon-Pareto (nunca esconder o que foi descartado). Valores
+# conferidos por script antes destes testes.
+
+_PARAMS_FUNIL = dict(percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500)
+
+
+def test_funil_selecao_portfolio_camada2_eficiencia():
+    diarios = _diarios_reais()
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        top_n_eficiencia=5, tolerancia_robustez_pct=20.0, **_PARAMS_FUNIL,
+    )
+    assert funil["camada1_sobrevivencia"]["n_avaliadas"] == 11
+
+    camada2 = funil["camada2_eficiencia"]
+    assert len(camada2) == 5
+    alocacoes_camada2 = [r["alocacao"] for r in camada2]
+    assert alocacoes_camada2[0] == {"resgat": 3, "gridhedge": 0, "romanos2": 0}
+    assert camada2[0]["eficiencia_rlt_mdd"] == pytest.approx(0.0015381976514051985, abs=1e-8)
+    assert alocacoes_camada2[-1] == {"resgat": 3, "gridhedge": 1, "romanos2": 2}
+    # ordem estritamente decrescente por eficiência.
+    assert [r["eficiencia_rlt_mdd"] for r in camada2] == sorted(
+        [r["eficiencia_rlt_mdd"] for r in camada2], reverse=True,
+    )
+
+
+def test_funil_selecao_portfolio_camada3_robustez():
+    diarios = _diarios_reais()
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        top_n_eficiencia=5, tolerancia_robustez_pct=20.0, **_PARAMS_FUNIL,
+    )
+    camada3 = funil["camada3_robustez"]
+    assert len(camada3["avaliados"]) == 5
+    assert len(camada3["sobreviventes"]) == 3
+
+    por_alocacao = {tuple(sorted(r["alocacao"].items())): r for r in camada3["avaliados"]}
+    caso_nao_robusto = por_alocacao[tuple(sorted({"resgat": 3, "gridhedge": 0, "romanos2": 0}.items()))]
+    assert caso_nao_robusto["robusto"] is False
+    assert caso_nao_robusto["media_rlt_vizinhas"] == pytest.approx(2.2979020163754376, abs=1e-6)
+
+    caso_robusto = por_alocacao[tuple(sorted({"resgat": 0, "gridhedge": 0, "romanos2": 2}.items()))]
+    assert caso_robusto["robusto"] is True
+    assert caso_robusto["media_rlt_vizinhas"] == pytest.approx(2.3849827428499557, abs=1e-6)
+
+    alocacoes_sobreviventes = [r["alocacao"] for r in camada3["sobreviventes"]]
+    assert {"resgat": 0, "gridhedge": 0, "romanos2": 2} in alocacoes_sobreviventes
+    assert {"resgat": 3, "gridhedge": 0, "romanos2": 2} in alocacoes_sobreviventes
+    assert {"resgat": 3, "gridhedge": 1, "romanos2": 2} in alocacoes_sobreviventes
+    assert {"resgat": 3, "gridhedge": 0, "romanos2": 0} not in alocacoes_sobreviventes
+    assert {"resgat": 6, "gridhedge": 0, "romanos2": 0} not in alocacoes_sobreviventes
+
+
+def test_funil_selecao_portfolio_camada4_simplicidade():
+    diarios = _diarios_reais()
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        top_n_eficiencia=5, tolerancia_robustez_pct=20.0, **_PARAMS_FUNIL,
+    )
+    camada4 = funil["camada4_simplicidade"]
+    assert len(camada4) == 3
+    assert [r["alocacao"] for r in camada4] == [
+        {"resgat": 0, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 1, "romanos2": 2},
+    ]
+    assert [r["total_contratos"] for r in camada4] == [2, 5, 6]
+
+
+# --- Monte Carlo em duas fases: robustez só nos finalistas (backlog de
+# prompts/otimizacao.pdf §10, fora dos épicos do PDF-fonte) ----------------
+#
+# "O Monte Carlo entra DEPOIS da triagem, não para rodar profundamente em
+# todas as 6 mil combinações." `robustez_dos_finalistas` roda
+# `robustez_portfolio`/os esquemas (`circular_block_bootstrap` ou o novo
+# `embaralhamento_dias`, mais `aplicar_choque` opcional) só sobre uma
+# lista pequena de finalistas (tipicamente
+# `funil_selecao_portfolio(...)['camada4_simplicidade']`) -- nenhuma
+# fórmula nova, só reusa `_sincronizar_alocacao` (já existente) e as
+# funções de `tradefolio.monte_carlo` diretamente (não
+# `robustez_portfolio`, que não expõe esquema/choques -- ela permanece
+# intocada e continua servindo o modo Robô único/o uso manual já
+# existente na UI). Verificado por equivalência: chamar
+# `robustez_dos_finalistas` com uma seed fixa deve reproduzir EXATAMENTE
+# o que sincronizar a alocação manualmente e rodar
+# `circular_block_bootstrap`/`resumo_trajetorias` à mão daria.
+
+
+def test_robustez_dos_finalistas_equivale_a_chamada_manual():
+    diarios = _diarios_reais()
+    finalistas = [
+        {"alocacao": {"resgat": 3, "gridhedge": 0, "romanos2": 0}, "limiar_ativo": 5000.0},
+        {"alocacao": {"resgat": 0, "gridhedge": 0, "romanos2": 2}, "limiar_ativo": 4000.0},
+    ]
+    resultados = robustez_dos_finalistas(
+        diarios, _MARGENS_POR_CONTRATO_10_8, finalistas,
+        tamanho_bloco=10, n_trajetorias=200, horizonte=50, seed=7,
+    )
+    assert len(resultados) == 2
+    assert [r["alocacao"] for r in resultados] == [f["alocacao"] for f in finalistas]
+
+    for r, finalista in zip(resultados, finalistas):
+        # reconstrução manual usando o mesmo caminho que buscar_combinacoes_portfolio usa
+        diarios_ativos = {}
+        margens_manuais = {}
+        for nome, n_contratos in finalista["alocacao"].items():
+            if n_contratos == 0:
+                continue
+            d = diarios[nome].copy()
+            d["liquido"] = d["liquido_por_contrato"] * n_contratos
+            diarios_ativos[nome] = d
+            margens_manuais[nome] = _MARGENS_POR_CONTRATO_10_8[nome] * n_contratos
+        largo_manual = restringir_janela_comum(sincronizar_portfolio(diarios_ativos))
+        base_manual = circular_block_bootstrap(
+            largo_manual, tamanho_bloco=10, n_trajetorias=200, horizonte=50, seed=7,
+        )
+        resumo_manual = resumo_trajetorias(
+            base_manual, minimum_margin=sum(margens_manuais.values()), limiar=finalista["limiar_ativo"],
+        )
+        assert r["lucro_p50"] == pytest.approx(resumo_manual["lucro_p50"])
+        assert r["mdd_p95"] == pytest.approx(resumo_manual["mdd_p95"])
+        assert r["cdar_95"] == pytest.approx(resumo_manual["cdar_95"])
+        assert r["probabilidade_toca_margem"] == pytest.approx(resumo_manual["probabilidade_toca_margem"])
+        assert r["esquema"] == "bloco"
+        assert r["choques_aplicados"] == []
+
+
+def test_robustez_dos_finalistas_esquema_embaralhamento():
+    diarios = _diarios_reais()
+    finalistas = [{"alocacao": {"resgat": 3, "gridhedge": 0, "romanos2": 0}, "limiar_ativo": 5000.0}]
+    resultados = robustez_dos_finalistas(
+        diarios, _MARGENS_POR_CONTRATO_10_8, finalistas,
+        esquema="embaralhamento", n_trajetorias=100, seed=7,
+    )
+    assert resultados[0]["esquema"] == "embaralhamento"
+
+
+def test_robustez_dos_finalistas_aplica_choques_em_sequencia():
+    diarios = _diarios_reais()
+    finalistas = [{"alocacao": {"resgat": 3, "gridhedge": 0, "romanos2": 0}, "limiar_ativo": 5000.0}]
+    resultados = robustez_dos_finalistas(
+        diarios, _MARGENS_POR_CONTRATO_10_8, finalistas,
+        tamanho_bloco=10, n_trajetorias=100, horizonte=50, seed=7,
+        choques=["pior_dia_repetido"],
+    )
+    assert resultados[0]["choques_aplicados"] == ["pior_dia_repetido"]
+    # o choque deve pesar no MDD -- comparado à mesma seed sem choque.
+    sem_choque = robustez_dos_finalistas(
+        diarios, _MARGENS_POR_CONTRATO_10_8, finalistas,
+        tamanho_bloco=10, n_trajetorias=100, horizonte=50, seed=7,
+    )
+    assert resultados[0]["mdd_p50"] <= sem_choque[0]["mdd_p50"]
+
+
+def test_robustez_dos_finalistas_esquema_invalido_levanta_erro():
+    diarios = _diarios_reais()
+    finalistas = [{"alocacao": {"resgat": 3, "gridhedge": 0, "romanos2": 0}, "limiar_ativo": 5000.0}]
+    with pytest.raises(ValueError, match="esquema"):
+        robustez_dos_finalistas(diarios, _MARGENS_POR_CONTRATO_10_8, finalistas, esquema="magico")
+
+
+# --- Shortlist final com perfis nomeados (backlog de
+# prompts/otimizacao.pdf §18, fora dos épicos do PDF-fonte) ----------------
+#
+# "Permitir ao usuário ver se a otimização complexa realmente supera
+# referências simples." Perfis implementados: Minimum Risk (menor MDD
+# dentro de um retorno mínimo), Growth (maior lucro dentro de um risco
+# máximo), Balanced (ponto da Fronteira de Pareto mais próximo do canto
+# ideal normalizado -- técnica padrão de "knee point" em otimização
+# multiobjetivo, não uma fórmula inventada), Handcrafted Risk (peso IGUAL
+# entre clusters, e DENTRO de cada cluster peso por risco inverso --
+# "um voto por cluster", evita que vários robôs correlacionados dominem
+# só por serem vários), e os 3 benchmarks fixos: carteira atual do
+# usuário (se informada), contratos iguais entre todos os robôs, risco
+# inverso GLOBAL (sem olhar clusters). **"Most Robust" deliberadamente
+# NÃO implementado** -- o próprio backlog condiciona isso a walk-forward
+# existir, que ainda não existe (só robustez local, que já existe).
+# Valores conferidos por script antes destes testes.
+
+_PARAMS_SHORTLIST = dict(percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500)
+
+
+def test_shortlist_portfolio_minimum_risk_e_growth():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        retorno_minimo=15000.0, risco_maximo=-3000.0, **_PARAMS_SHORTLIST,
+    )
+    assert shortlist["minimum_risk"]["alocacao"] == {"resgat": 3, "gridhedge": 0, "romanos2": 0}
+    assert shortlist["minimum_risk"]["mdd"] == pytest.approx(-2067.0, abs=1e-2)
+    assert shortlist["growth"]["alocacao"] == {"resgat": 3, "gridhedge": 0, "romanos2": 2}
+    assert shortlist["growth"]["lucro_total"] == pytest.approx(28268.5, abs=1e-2)
+
+
+def test_shortlist_portfolio_balanced_e_ponto_da_fronteira():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        **_PARAMS_SHORTLIST,
+    )
+    assert shortlist["balanced"]["alocacao"] == {"resgat": 3, "gridhedge": 1, "romanos2": 2}
+    fronteira = fronteira_pareto(resultados, "lucro_total", "mdd")
+    assert shortlist["balanced"]["alocacao"] in [r["alocacao"] for r in fronteira]
+
+
+def test_shortlist_portfolio_handcrafted_risk_um_voto_por_cluster():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    clusters_singleton = [["resgat"], ["gridhedge"], ["romanos2"]]
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        clusters=clusters_singleton, **_PARAMS_SHORTLIST,
+    )
+    # com clusters todos de 1 membro, "um voto por cluster" vira
+    # exatamente contratos iguais -- ilustra o efeito de dar 1 voto por
+    # cluster em vez de por robô (aqui degenerado, mas o mecanismo é o
+    # mesmo que evitaria 4 robôs de reversão dominarem por serem vários).
+    assert shortlist["handcrafted_risk"]["alocacao"] == {"resgat": 4, "gridhedge": 4, "romanos2": 4}
+    assert shortlist["handcrafted_risk"]["alocacao"] == shortlist["contratos_iguais"]["alocacao"]
+
+
+def test_shortlist_portfolio_risco_inverso_e_contratos_iguais():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        **_PARAMS_SHORTLIST,
+    )
+    assert shortlist["contratos_iguais"]["alocacao"] == {"resgat": 4, "gridhedge": 4, "romanos2": 4}
+    # risco inverso favorece o robô de MENOR desvio padrão (gridhedge) --
+    # diferente de contratos iguais, exatamente por isso é um benchmark
+    # distinto.
+    assert shortlist["risco_inverso"]["alocacao"] == {"resgat": 4, "gridhedge": 5, "romanos2": 3}
+
+
+def test_shortlist_portfolio_carteira_atual_quando_informada():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    alocacao_atual = {"resgat": 3, "gridhedge": 1, "romanos2": 2}
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        alocacao_atual=alocacao_atual, **_PARAMS_SHORTLIST,
+    )
+    assert shortlist["carteira_atual"]["alocacao"] == alocacao_atual
+    esperado = next(r for r in resultados if r["alocacao"] == alocacao_atual)
+    assert shortlist["carteira_atual"]["mdd"] == pytest.approx(esperado["mdd"], abs=1e-2)
+    assert shortlist["carteira_atual"]["lucro_total"] == pytest.approx(esperado["lucro_total"], abs=1e-2)
+
+
+def test_shortlist_portfolio_sem_carteira_atual_ou_clusters_omite_chaves():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        **_PARAMS_SHORTLIST,
+    )
+    assert "carteira_atual" not in shortlist
+    assert "handcrafted_risk" not in shortlist
+    assert "most_robust" not in shortlist  # deliberadamente não implementado (walk-forward ausente)
 
 
 # --- Curva de limiares (backlog de prompts/otimizacao.pdf, fora dos
