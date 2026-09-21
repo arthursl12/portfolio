@@ -41,6 +41,8 @@ from tradefolio.drawdowns import drawdown_corrente, episodios_drawdown, tempo_re
 from tradefolio.loaders import carregar_ordens
 from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
+    lucro_por_periodo,
+    serie_combinada,
     beneficio_diversificacao,
     buscar_combinacoes_portfolio,
     buscar_combinacoes_portfolio_com_filtros,
@@ -168,6 +170,36 @@ AJUDA_AUMENTO_CUSTOS = "Aumenta o custo B3 (emolumento) em X% antes de simular -
 AJUDA_SLIPPAGE = "Custo extra fixo por trade (R$), somado ao emolumento B3 -- simula slippage adicional."
 AJUDA_REMOVER_MELHORES = "Zera os N melhores dias do histórico antes de simular -- testa quão dependente o robô é dos seus melhores eventos."
 AJUDA_DUPLICAR_PIORES = "Dobra (no lugar, não insere uma data nova) o valor dos N piores dias antes de simular -- testa um cenário onde as piores perdas já observadas fossem duas vezes piores."
+
+
+def _grafico_lucro_por_periodo(combinada: pd.Series, chave: str):
+    """Barras de lucro/prejuízo (R$ total, série combinada) por semana ou
+    mês, com alternância. Só apresentação: a soma vem de
+    tradefolio.portfolio.lucro_por_periodo."""
+    freq = st.segmented_control(
+        "Período", ["Semanal", "Mensal"], default="Mensal", key=f"{chave}_freq",
+        help="Soma do resultado líquido combinado por semana (segunda a domingo) ou mês-calendário.",
+    ) or "Mensal"
+    periodo = lucro_por_periodo(combinada, freq.lower())
+    periodo = periodo.reset_index(names="inicio")
+    fmt_data = "%d/%m/%Y" if freq == "Semanal" else "%m/%Y"
+    periodo["rotulo"] = periodo["inicio"].dt.strftime(fmt_data)
+    periodo["situacao"] = periodo["lucro"].apply(lambda v: "Lucro" if v >= 0 else "Prejuízo")
+    periodo["parcial"] = periodo["completo"].map({True: "", False: " (período parcial)"})
+    fig = px.bar(
+        periodo, x="inicio", y="lucro", color="situacao",
+        color_discrete_map={"Lucro": "#2e9d5b", "Prejuízo": "#d64545"},
+        custom_data=["rotulo", "parcial"],
+    )
+    fig.update_traces(hovertemplate="%{customdata[0]}%{customdata[1]}<br>R$ %{y:,.2f}<extra></extra>")
+    fig.update_layout(showlegend=False, xaxis_title=None, yaxis_title="Resultado (R$)", bargap=0.15)
+    st.plotly_chart(fig, width="stretch", key=f"{chave}_fig")
+    positivos = int((periodo["lucro"] > 0).sum())
+    st.caption(
+        f"{positivos} de {len(periodo)} {'semanas' if freq == 'Semanal' else 'meses'} positivos · "
+        f"melhor: {fmt(periodo['lucro'].max(), moeda=True)} · pior: {fmt(periodo['lucro'].min(), moeda=True)}. "
+        "Primeiro/último período podem ser parciais (a série começa/termina no meio deles)."
+    )
 
 
 def rodar_modo_portfolio():
@@ -470,6 +502,10 @@ def rodar_modo_portfolio():
     colp1.metric("Lucro total (combinado)", fmt(agregadas["lucro_total"], moeda=True))
     colp2.metric("Maximum Drawdown (combinado)", fmt(agregadas["mdd"], moeda=True))
     colp3.metric("Expected Shortfall 95% (combinado)", fmt(agregadas["es_95"], moeda=True))
+
+    with st.expander("Lucro/prejuízo por semana e por mês (combinado)", expanded=True):
+        _grafico_lucro_por_periodo(serie_combinada(largo), "portfolio_lucro_periodo")
+
 
     operou = sincronizar_operou(diarios)
 
@@ -2130,6 +2166,10 @@ def _builder_passo7_plano_operacional():
     st.markdown("### PORTFÓLIO ESCOLHIDO")
     for nome, v in plano["alocacao_final"].items():
         st.caption(f"{nome}: {v} contrato(s)")
+    if diarios_ativos:
+        st.markdown("**Lucro/prejuízo por semana e por mês**")
+        _grafico_lucro_por_periodo(serie_combinada(largo_escolhido), "builder_lucro_periodo")
+
     col1, col2, col3 = st.columns(3)
     col1.metric("Capital reservado", fmt(plano["capital_reservado"], moeda=True))
     col2.metric("MDD de projeto", fmt(plano["mdd_projeto"], moeda=True))

@@ -91,6 +91,36 @@ def serie_combinada(largo: pd.DataFrame) -> pd.Series:
     return largo.sum(axis=1, skipna=True)
 
 
+def lucro_por_periodo(combinada: pd.Series, frequencia: str) -> pd.DataFrame:
+    """Lucro/prejuízo (R$ total, mesma base de `serie_combinada`) somado por
+    semana ou mês-calendário. `frequencia`: "semanal" (segunda a domingo,
+    rotulada pela segunda-feira que abre a semana) ou "mensal" (rotulado
+    pelo primeiro dia do mês). Períodos sem nenhum pregão entre o primeiro
+    e o último dado ficam com lucro 0 (não são removidos).
+
+    `completo` é False para o primeiro/último período quando a série
+    começa/termina no meio dele (primeiro dia dos dados > início do período,
+    ou último dia < fim do período) -- só olha as datas presentes, não o
+    calendário B3."""
+    if frequencia not in ("semanal", "mensal"):
+        raise ValueError(f"frequencia deve ser 'semanal' ou 'mensal', recebido {frequencia!r}")
+
+    if frequencia == "semanal":
+        # label="left" rotula pelo domingo ANTERIOR; +1 dia dá a segunda-feira
+        soma = combinada.resample("W-SUN", label="left", closed="right").sum()
+        soma.index = soma.index + pd.Timedelta(days=1)
+        fins = soma.index + pd.Timedelta(days=6)
+    else:
+        soma = combinada.resample("MS").sum()
+        fins = soma.index + pd.offsets.MonthEnd(0)
+
+    completo = pd.Series(True, index=soma.index)
+    if len(soma):
+        completo.iloc[0] = combinada.index.min() <= soma.index[0]
+        completo.iloc[-1] = completo.iloc[-1] and combinada.index.max().normalize() >= fins[-1].normalize()
+    return pd.DataFrame({"lucro": soma, "completo": completo})
+
+
 def metricas_agregadas(largo: pd.DataFrame) -> dict:
     """Lucro total, MDD, ES95, TUW, pior dia/mês e lucro mensal sobre a
     série COMBINADA (tarefa 10.3, ver docstring do módulo para o que
