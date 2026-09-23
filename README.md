@@ -25,35 +25,34 @@ projeto — sem ele, `import tradefolio` só funciona dentro do pytest.)
 vírgula, colunas como `Data/Hora`, `C/V`, `Tipo`, `Resultado (R$)`) e escreve
 um HTML autocontido (gráficos embutidos em base64).
 
-O caminho de entrada e o de saída estão fixados no topo/final de `report.py`:
-
-```python
-CSV_PATH = "/mnt/user-data/uploads/orders_romanos.csv"   # linha ~19
-...
-out_path = "/mnt/user-data/outputs/lamina_romanos_pagina1.html"  # dentro do __main__
-```
-
-Para gerar um relatório com os seus próprios dados, edite essas duas linhas
-apontando para o seu CSV de ordens e para onde você quer o HTML, depois rode:
+`report.py` é uma CLI (`argparse`), sem caminhos fixados no código. Modo
+`robo` (um único robô):
 
 ```bash
-.venv/bin/python report.py
+.venv/bin/python report.py robo caminho/para/ordens.csv saida.html --minimum-margin 5000
 ```
 
-O caminho de saída será impresso no final (`Salvo em: ...`).
+`--minimum-margin` (margem mínima da posição, em R$) é obrigatório —
+`AGENTS.md` §8 proíbe inventar um valor de convenção financeira, então não
+há default. Há muitos outros parâmetros opcionais (Monte Carlo, cenário de
+deterioração, custo mensal, janela de detecção multi-ativo, ...) —
+`.venv/bin/python report.py robo --help` lista todos. Modo `portfolio`
+(2+ robôs combinados) segue o mesmo padrão — `.venv/bin/python report.py
+portfolio --help`. O caminho de saída é impresso no final (`Salvo em: ...`).
 
 ### Teste rápido com dados de exemplo
 
-O repositório já traz um CSV real (robô "Romanos") em
-`tests/fixtures/romanos_orders.csv`, útil para ver o relatório funcionando
-sem precisar de dados próprios:
+O repositório já traz CSVs reais de robôs em `dados_exemplo/` (e um em
+`tests/fixtures/romanos_orders.csv`, usado pela suíte de testes), úteis para
+ver o relatório funcionando sem precisar de dados próprios:
 
 ```bash
 .venv/bin/python demo.py
 ```
 
-Isso escreve `lamina_exemplo.html` na raiz do projeto (veja `demo.py` para o
-código) — abra no navegador.
+Isso roda sobre `dados_exemplo/orders_romanos2.csv` e escreve
+`orders_romanos2.html` na raiz do projeto (edite as constantes no topo de
+`demo.py` para apontar para outro CSV) — abra o HTML no navegador.
 
 ## Página ao vivo (Streamlit)
 

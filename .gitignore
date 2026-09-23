@@ -5,3 +5,13 @@ __pycache__/
 .coverage
 *.egg-info/
 lamina_exemplo.html
+orders_*.html
+
+# Claude Code tooling/config -- kept local, not part of the published repo
+.claude/
+.agents/
+
+# Personal drafts/planning material -- kept local, not part of the published repo
+posts/
+prompts/
+scripts/

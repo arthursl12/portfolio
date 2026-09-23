@@ -4,6 +4,8 @@ Parser de ordens (formato Smarttbot) -> dataframe diário -> métricas de resumo
 curva/drawdown e distribuição/cauda.
 """
 
+import sys
+
 import pandas as pd
 import numpy as np
 import pandas_market_calendars as mcal
@@ -318,12 +320,17 @@ def calcular_metricas_pagina3(diario: pd.DataFrame) -> dict:
 
 
 if __name__ == "__main__":
-    diario = montar_dataframe_diario()
+    # Script de referência legado (README: "não é mais o caminho usado por
+    # report.py") -- aceita o CSV como argumento opcional em vez de exigir
+    # editar CSV_PATH; sem argumento, mantém o default acima inalterado.
+    csv_path = sys.argv[1] if len(sys.argv) > 1 else CSV_PATH
+
+    diario = montar_dataframe_diario(csv_path)
     metricas, equity, drawdown = calcular_metricas_pagina1(diario)
     for k, v in metricas.items():
         print(f"{k:35s}: {v}")
 
-    ordens = carregar_ordens(CSV_PATH)
+    ordens = carregar_ordens(csv_path)
     p2 = calcular_metricas_pagina2(diario, ordens)
     print("\n--- Página 2 ---")
     print("Maior sequência positiva (trades):", p2["maior_sequencia_positiva_trades"])
