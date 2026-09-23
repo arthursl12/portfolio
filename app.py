@@ -10,6 +10,8 @@ histórico completo de posição desde o início; cortar no meio de um trade
 aberto corromperia o rastreamento de posição líquida). Métricas diárias
 não têm esse problema -- cada dia é agregado independentemente.
 """
+import math
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -29,6 +31,7 @@ from tradefolio.daily import (
     contratos_referencia_por_ativo,
     detectar_contratos_referencia,
     detectar_contratos_referencia_multi_ativo,
+    detectar_contratos_referencia_piramide,
     escalar_por_contratos,
 )
 from tradefolio.daily_results import (
@@ -43,6 +46,7 @@ from tradefolio.metric_registry import REGISTRO
 from tradefolio.portfolio import (
     lucro_por_periodo,
     serie_combinada,
+    _LIMITE_COMBINACOES_OTIMIZACAO,
     beneficio_diversificacao,
     buscar_combinacoes_portfolio,
     buscar_combinacoes_portfolio_com_filtros,
@@ -97,6 +101,20 @@ FORA_DE_ESCOPO = (
 )
 
 DADOS_EXEMPLO_DIR = Path(__file__).parent / "dados_exemplo"
+
+
+def _fmt_duracao(segundos: float) -> str:
+    """Formata uma duração em segundos como texto curto (`"45s"`,
+    `"2min 10s"`, `"1h 05min"`) -- só apresentação para as estimativas de
+    tempo da busca do Portfolio Builder, nenhum cálculo financeiro."""
+    segundos = max(0, round(segundos))
+    if segundos < 60:
+        return f"{segundos}s"
+    minutos, resto_s = divmod(segundos, 60)
+    if minutos < 60:
+        return f"{minutos}min {resto_s:02d}s"
+    horas, resto_min = divmod(minutos, 60)
+    return f"{horas}h {resto_min:02d}min"
 
 # Campos de tradefolio.report_data.calcular_pagina1 que são valores
 # absolutos em R$/contrato -- escalam linearmente com o número de
@@ -345,10 +363,23 @@ def rodar_modo_portfolio():
                     contratos_referencia = detectar_contratos_referencia_multi_ativo(
                         ordens, dias_recentes=int(dias_recentes)
                     )
-                except ValueError as erro:
-                    st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
-                    houve_erro = True
-                    continue
+                except ValueError:
+                    # Nem quantidade dominante nem proporção fixa entre
+                    # pernas -- tenta o padrão de piramidação (robô tipo
+                    # "Flecha": reforça a mesma posição em várias pernas
+                    # de 'entrada' antes de uma única saída grande).
+                    try:
+                        contratos_referencia = detectar_contratos_referencia_piramide(ordens)
+                        with st.sidebar:
+                            st.info(
+                                f"{nome_robo}: padrão de piramidação detectado -- "
+                                f"contratos de referência = {contratos_referencia} "
+                                "(menor unidade de reforço recorrente)."
+                            )
+                    except ValueError as erro:
+                        st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
+                        houve_erro = True
+                        continue
 
             diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
 
@@ -505,7 +536,6 @@ def rodar_modo_portfolio():
 
     with st.expander("Lucro/prejuízo por semana e por mês (combinado)", expanded=True):
         _grafico_lucro_por_periodo(serie_combinada(largo), "portfolio_lucro_periodo")
-
 
     operou = sincronizar_operou(diarios)
 
@@ -1018,7 +1048,7 @@ def rodar_modo_portfolio():
                 "comparação lado a lado. `buscar_combinacoes_portfolio_com_filtros` reusa o MESMO "
                 "cálculo por combinação; só muda quantas combinações chegam até ele, em 3 camadas "
                 "baratas ANTES do cálculo caro: (1) dedupe de composição/escala -- [2,2] é a MESMA "
-                "composição que [1,1] em outra escala, mantém só a de menor escala; (2) mínimo de "
+                "composição que [1,1] em outra escala, mantém só a maior escala que passa nos tetos; (2) mínimo de "
                 "robôs ativos e margem máxima agregada (baratos, só olham a alocação); (3) pior dia "
                 "histórico máximo (não é um cenário estressado/Monte Carlo -- isso é backlog "
                 "separado, para uma fase de finalistas). Com tudo desligado, reproduz exatamente a "
@@ -1029,7 +1059,8 @@ def rodar_modo_portfolio():
             deduplicar_composicao = colf1.checkbox(
                 "Deduplicar composição/escala", value=True, key="portfolio_filtros_dedupe",
                 help="Descarta combinações que são apenas uma versão escalada de outra já testada "
-                     "(ex. [2,2] vs [1,1]) -- mantém só a de menor escala.",
+                     "(ex. [2,2] vs [1,1]) -- mantém só a MAIOR escala que passa em todos os tetos "
+                     "(margem, MDD, limiar...), pois os resultados em R$ mudam com a escala.",
             )
             min_robos_ativos = colf2.number_input(
                 "Mínimo de robôs ativos", min_value=0, max_value=len(candidatos_contratos),
@@ -1619,9 +1650,16 @@ def _builder_carregar_diarios_referencia(arquivos: list) -> dict:
             except ValueError:
                 try:
                     contratos_referencia = detectar_contratos_referencia_multi_ativo(ordens, dias_recentes=90)
-                except ValueError as erro:
-                    st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
-                    continue
+                except ValueError:
+                    # Nem quantidade dominante nem proporção fixa entre
+                    # pernas -- tenta o padrão de piramidação (robô tipo
+                    # "Flecha": reforça a mesma posição em várias pernas
+                    # de 'entrada' antes de uma única saída grande).
+                    try:
+                        contratos_referencia = detectar_contratos_referencia_piramide(ordens)
+                    except ValueError as erro:
+                        st.error(f"{nome_robo}: não foi possível determinar contratos de referência: {erro}")
+                        continue
             diario = preencher_calendario_b3(agregar_diario(ordens, contratos_referencia=contratos_referencia))
 
         diarios_referencia[nome_robo] = diario
@@ -1753,13 +1791,61 @@ def _builder_passo2_orcamento_de_risco():
         "Horizonte mínimo de avaliação (meses)", min_value=1, value=6, step=1,
         key="builder_horizonte_minimo",
     )
+    restringir_busca_ao_capital = st.checkbox(
+        "Restringir a busca ao capital reservado (recomendado)", value=True,
+        key="builder_restringir_capital",
+        help=(
+            "Se marcado, o Passo 5 só considera carteiras cujo limiar de capital calculado "
+            "fica dentro do capital reservado acima -- e destaca a de maior retorno dentro "
+            "desse teto. Se desmarcado, o capital reservado acima permanece só informativo."
+        ),
+    )
+
+    # Antes hardcoded em app.py (percentil_cauda=95, fracao_reserva_
+    # operacional=0.10, increment=500.0) sem nenhum controle visível --
+    # pedido de acompanhamento do usuário: "o que decide isso, e por que
+    # eu não vejo?". Agora widgets aqui, cujo valor alimenta TANTO a
+    # pré-visualização de limiar logo abaixo QUANTO a busca de verdade no
+    # Passo 5 (mesma fonte -- session_state["builder_orcamento"] --
+    # evita a pré-visualização e a busca usarem números diferentes, que
+    # era um bug real: a pré-visualização já rodava com os DEFAULTS do
+    # motor, fracao_reserva_operacional=0.0, enquanto o Passo 5 sempre
+    # usou 0.10).
+    with st.expander("Parâmetros do cálculo de limiar (capital necessário)"):
+        st.caption(
+            "Controlam como o \"capital necessário\" de cada carteira é calculado a partir do "
+            "drawdown histórico -- afetam o número mostrado em cada carteira candidata E (se "
+            "\"restringir a busca ao capital reservado\" estiver marcado acima) quais carteiras "
+            "sobrevivem à busca."
+        )
+        colp1, colp2, colp3 = st.columns(3)
+        percentil_cauda = colp1.selectbox(
+            "Percentil de cauda do drawdown", [95, 99], index=0, key="builder_percentil_cauda",
+            help=(
+                "A reserva de capital para drawdown é dimensionada por este percentil da "
+                "distribuição histórica de drawdown -- 99 é mais conservador (reserva maior) que 95."
+            ),
+        )
+        fracao_reserva_operacional_pct = colp2.number_input(
+            "Reserva operacional extra (%)", min_value=0.0, max_value=100.0, value=10.0, step=1.0,
+            key="builder_fracao_reserva_operacional",
+            help="Percentual da margem somado como reserva operacional além da reserva de drawdown.",
+        )
+        increment_limiar = colp3.number_input(
+            "Arredondar limiar para múltiplos de (R$)", min_value=0.0, value=500.0, step=100.0,
+            key="builder_increment_limiar",
+        )
 
     mdd_historico_referencia = None
     limiar_referencia = None
     if all(margens_incluidos.get(n) for n in incluidos):
         largo_ref = restringir_janela_comum(sincronizar_portfolio(diarios_incluidos))
         mdd_historico_referencia = metricas_agregadas(largo_ref)["mdd"]
-        limiar_ref = limiar_agregado_portfolio(largo_ref, margens_incluidos)
+        limiar_ref = limiar_agregado_portfolio(
+            largo_ref, margens_incluidos, percentil_cauda=percentil_cauda,
+            fracao_reserva_operacional=fracao_reserva_operacional_pct / 100.0,
+            increment=increment_limiar or None,
+        )
         limiar_referencia = limiar_ref.get("limiar_recomendado", limiar_ref["limiar_bruto"])
     else:
         st.caption(
@@ -1781,6 +1867,10 @@ def _builder_passo2_orcamento_de_risco():
     # `None`/o valor sumiria.
     orcamento["capital_reservado"] = capital_reservado
     orcamento["perda_maxima_aceitavel"] = perda_maxima_aceitavel
+    orcamento["restringir_busca_ao_capital"] = restringir_busca_ao_capital
+    orcamento["percentil_cauda"] = percentil_cauda
+    orcamento["fracao_reserva_operacional"] = fracao_reserva_operacional_pct / 100.0
+    orcamento["increment_limiar"] = increment_limiar or None
     st.session_state["builder_orcamento"] = orcamento
     st.session_state["builder_horizonte_minimo_meses"] = horizonte_minimo_meses
 
@@ -1848,7 +1938,21 @@ def _builder_passo3_concentracao():
     else:
         st.caption("• Nenhuma concentração óbvia detectada nos limiares atuais.")
 
-    clusters = clusters_de_risco(largo, limiar_correlacao=0.5)
+    # Antes hardcoded (`limiar_correlacao=0.5`) -- diferente dos dois
+    # limiares acima, que só geram os avisos de texto, este é o que de
+    # fato DECIDE quais EAs entram no mesmo cluster de risco (usado pelo
+    # filtro "Máximo de risco por cluster" abaixo E no Passo 5). Pedido
+    # de acompanhamento do usuário: esse número precisa estar visível,
+    # não só os dois que já eram.
+    limiar_correlacao_cluster = st.number_input(
+        "Limiar de correlação para agrupar em cluster de risco",
+        min_value=-1.0, max_value=1.0, value=0.5, step=0.05, key="builder_limiar_correlacao_cluster",
+        help=(
+            "Dois EAs com correlação acima deste valor entram no mesmo cluster -- usado pelo "
+            "\"Máximo de risco por cluster\" abaixo, não pelos dois limiares de aviso acima."
+        ),
+    )
+    clusters = clusters_de_risco(largo, limiar_correlacao=limiar_correlacao_cluster)
     st.markdown("**Clusters**")
     for i, cluster in enumerate(clusters):
         rotulo = "Estratégia independente" if len(cluster) == 1 else f"Cluster {i + 1}"
@@ -1941,34 +2045,232 @@ def _builder_passo5_candidatos():
         "se for grande demais)."
     )
 
+    capital_alvo = orcamento.get("capital_reservado") if orcamento.get("restringir_busca_ao_capital") else None
+
+    # Parâmetros de filtro compartilhados pela busca completa E pela
+    # amostra de calibração abaixo (pedido de acompanhamento do usuário:
+    # estimar o tempo antes de rodar tudo) -- montados uma vez para não
+    # duplicar a lista em dois lugares. percentil_cauda/fracao_reserva_
+    # operacional/increment vêm dos widgets do Passo 2 (antes hardcoded
+    # aqui, 95/0.10/500.0, sem nenhum controle visível -- mesma fonte que
+    # a pré-visualização do Passo 2 usa, para as duas nunca divergirem).
+    kwargs_filtros_busca = dict(
+        percentil_cauda=orcamento.get("percentil_cauda", 95),
+        fracao_reserva_operacional=orcamento.get("fracao_reserva_operacional", 0.10),
+        increment=orcamento.get("increment_limiar", 500.0),
+        deduplicar_composicao=True,
+        min_robos_ativos=restricoes.get("min_robos_ativos", 1),
+        max_contratos_total=restricoes.get("max_contratos_total"),
+        clusters=restricoes.get("clusters"),
+        limite_risco_por_robo_pct=restricoes.get("limite_risco_por_robo_pct"),
+        limite_risco_por_cluster_pct=restricoes.get("limite_risco_por_cluster_pct"),
+        mdd_maximo=-orcamento["mdd_projeto"] if orcamento.get("mdd_projeto") else None,
+        limiar_maximo=capital_alvo,
+    )
+
+    def _rodar_busca_completa():
+        # Barra de progresso + ETA ao vivo (pedido de acompanhamento do
+        # usuário: "tipo tqdm, e poder cancelar"). `progress_callback` só
+        # entrega (processadas, total) -- o cronômetro e a estimativa de
+        # tempo restante são responsabilidade da UI (AGENTS.md §16/17), não
+        # da engine. Atualiza a cada ~0.5% do total (não a cada combinação
+        # -- em buscas grandes isso sobrecarregaria o navegador à toa).
+        # Clicar em QUALQUER outro widget desta página enquanto a barra
+        # está atualizando cancela a busca em andamento -- comportamento
+        # nativo do Streamlit (uma nova interação interrompe o script em
+        # execução no próximo ponto `st.*`, que é exatamente a atualização
+        # da barra).
+        barra = st.progress(0.0, text=f"0/{n_total_candidatos} combinações")
+        inicio = time.time()
+        passo_atualizacao = max(1, n_total_candidatos // 200)
+
+        def _progresso(processadas, total):
+            if processadas != total and processadas % passo_atualizacao != 0:
+                return
+            decorrido = time.time() - inicio
+            taxa = processadas / decorrido if decorrido > 0 else 0.0
+            texto = f"{processadas}/{total} combinações"
+            if taxa > 0 and processadas < total:
+                texto += f" -- tempo restante estimado: {_fmt_duracao((total - processadas) / taxa)}"
+            barra.progress(processadas / total, text=texto)
+
+        try:
+            funil = funil_selecao_portfolio(
+                diarios_incluidos, margens_incluidos, candidatos_contratos,
+                confirmar_combinacoes_grandes=True, progress_callback=_progresso,
+                retornar_excluidos=True,
+                **kwargs_filtros_busca,
+            )
+        finally:
+            barra.empty()
+
+        if not funil["camada4_simplicidade"]:
+            st.warning("Nenhuma combinação sobreviveu às restrições -- afrouxe o Passo 3 ou o orçamento do Passo 2.")
+            st.session_state["builder_shortlist"] = None
+            st.session_state["builder_funil_resumo"] = None
+            st.session_state["builder_excluidos"] = funil["camada1_sobrevivencia"].get("excluidos", [])
+        else:
+            shortlist = shortlist_portfolio(
+                funil["camada4_simplicidade"], diarios_incluidos, margens_incluidos,
+                total_contratos_benchmark=restricoes.get("max_contratos_total", 12),
+                clusters=restricoes.get("clusters"),
+                capital_alvo=capital_alvo,
+                percentil_cauda=kwargs_filtros_busca["percentil_cauda"],
+                fracao_reserva_operacional=kwargs_filtros_busca["fracao_reserva_operacional"],
+                increment=kwargs_filtros_busca["increment"],
+            )
+            st.session_state["builder_shortlist"] = shortlist
+            camada1 = funil["camada1_sobrevivencia"]
+            st.session_state["builder_funil_resumo"] = {
+                "n_combinacoes_totais": camada1["n_combinacoes_totais"],
+                "n_puladas_composicao_duplicada": camada1["n_puladas_composicao_duplicada"],
+                "n_puladas_sobrevivencia": camada1["n_puladas_sobrevivencia"],
+                "n_puladas_cluster": camada1["n_puladas_cluster"],
+                "n_puladas_perda_diaria": camada1["n_puladas_perda_diaria"],
+                "n_puladas_mdd": camada1["n_puladas_mdd"],
+                "n_puladas_risco": camada1["n_puladas_risco"],
+                "n_puladas_limiar": camada1["n_puladas_limiar"],
+                "n_puladas_sem_janela_comum": camada1["n_puladas_sem_janela_comum"],
+                "n_avaliadas_camada1": camada1["n_avaliadas"],
+                "n_camada2": len(funil["camada2_eficiencia"]),
+                "n_camada2_extra_fronteira": sum(
+                    1 for r in funil["camada2_eficiencia"] if r["preservado_pela_fronteira"]
+                ),
+                "n_camada3_avaliados": len(funil["camada3_robustez"]["avaliados"]),
+                "n_camada3_sobreviventes": len(funil["camada3_robustez"]["sobreviventes"]),
+                "n_camada4": len(funil["camada4_simplicidade"]),
+            }
+            st.session_state["builder_finalistas"] = funil["camada4_simplicidade"]
+            st.session_state["builder_excluidos"] = camada1.get("excluidos", [])
+
+    rodar_agora = False
     if st.button("Gerar carteiras candidatas", icon=":material/search:"):
+        st.session_state["builder_estimativa_busca"] = None
+        if n_total_candidatos > _LIMITE_COMBINACOES_OTIMIZACAO:
+            # Pedido de acompanhamento do usuário: em vez de um limite
+            # fixo que só barra a busca, calibra rodando uma AMOSTRA
+            # pequena de verdade (mesmos filtros, mesmos dados -- não um
+            # número inventado) para estimar o tempo total, e deixa o
+            # usuário decidir se quer continuar.
+            with st.spinner("Estimando o tempo da busca completa (rodando uma amostra pequena)..."):
+                amostra_contratos = {n: v[: min(2, len(v))] for n, v in candidatos_contratos.items()}
+                n_amostra = math.prod(len(v) for v in amostra_contratos.values())
+                inicio_amostra = time.time()
+                buscar_combinacoes_portfolio_com_filtros(
+                    diarios_incluidos, margens_incluidos, amostra_contratos,
+                    confirmar_combinacoes_grandes=True, **kwargs_filtros_busca,
+                )
+                tempo_por_combinacao = (time.time() - inicio_amostra) / n_amostra if n_amostra else 0.0
+            st.session_state["builder_estimativa_busca"] = {
+                "n_total": n_total_candidatos,
+                "tempo_estimado": tempo_por_combinacao * n_total_candidatos,
+            }
+        else:
+            rodar_agora = True
+
+    estimativa = st.session_state.get("builder_estimativa_busca")
+    if estimativa and not rodar_agora:
+        st.warning(
+            f"{estimativa['n_total']} combinações -- tempo estimado para a busca completa: "
+            f"~{_fmt_duracao(estimativa['tempo_estimado'])} (estimativa calibrada com uma amostra real, "
+            f"não um número fixo). Isso passa do limiar de {_LIMITE_COMBINACOES_OTIMIZACAO} combinações "
+            "que normalmente pede confirmação -- reduza o \"máximo de contratos por EA\" no Passo 3 para "
+            "uma busca mais rápida, ou confirme abaixo para rodar mesmo assim."
+        )
+        col_confirmar, col_cancelar = st.columns(2)
+        if col_confirmar.button("Confirmar e rodar busca completa", icon=":material/play_arrow:"):
+            st.session_state["builder_estimativa_busca"] = None
+            rodar_agora = True
+        if col_cancelar.button("Cancelar", key="builder_cancelar_busca_grande"):
+            st.session_state["builder_estimativa_busca"] = None
+
+    if rodar_agora:
         with st.spinner("Buscando, aplicando o funil de 4 camadas e montando a shortlist..."):
             try:
-                funil = funil_selecao_portfolio(
-                    diarios_incluidos, margens_incluidos, candidatos_contratos,
-                    percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500.0,
-                    deduplicar_composicao=True,
-                    min_robos_ativos=restricoes.get("min_robos_ativos", 1),
-                    max_contratos_total=restricoes.get("max_contratos_total"),
-                    clusters=restricoes.get("clusters"),
-                    limite_risco_por_robo_pct=restricoes.get("limite_risco_por_robo_pct"),
-                    limite_risco_por_cluster_pct=restricoes.get("limite_risco_por_cluster_pct"),
-                    mdd_maximo=-orcamento["mdd_projeto"] if orcamento.get("mdd_projeto") else None,
-                )
+                _rodar_busca_completa()
             except ValueError as erro:
                 st.error(str(erro))
-            else:
-                if not funil["camada4_simplicidade"]:
-                    st.warning("Nenhuma combinação sobreviveu às restrições -- afrouxe o Passo 3 ou o orçamento do Passo 2.")
-                else:
-                    shortlist = shortlist_portfolio(
-                        funil["camada4_simplicidade"], diarios_incluidos, margens_incluidos,
-                        total_contratos_benchmark=restricoes.get("max_contratos_total", 12),
-                        clusters=restricoes.get("clusters"),
-                        percentil_cauda=95, fracao_reserva_operacional=0.10, increment=500.0,
-                    )
-                    st.session_state["builder_shortlist"] = shortlist
-                    st.session_state["builder_funil_n_avaliadas"] = funil["camada1_sobrevivencia"]["n_avaliadas"]
+
+    resumo_funil = st.session_state.get("builder_funil_resumo")
+    if resumo_funil:
+        st.caption(
+            f"{resumo_funil['n_combinacoes_totais']} combinações totais → "
+            f"{resumo_funil['n_avaliadas_camada1']} sobrevivem aos filtros de sobrevivência do Passo 2/3 → "
+            f"{resumo_funil['n_camada2']} seguem para o teste de robustez "
+            f"(inclui {resumo_funil['n_camada2_extra_fronteira']} mantida(s) por serem Pareto-ótimas "
+            "mesmo fora do topo por eficiência RLT/MDD) → "
+            f"{resumo_funil['n_camada3_sobreviventes']} passam no teste de robustez (±1 contrato) → "
+            f"{resumo_funil['n_camada4']} finalista(s) simples."
+        )
+        with st.expander(f"Ver as {resumo_funil['n_camada4']} carteira(s) finalista(s) consideradas (não só as 3-4 abaixo)"):
+            st.caption(
+                "Toda carteira que chegou até aqui já passou pelos filtros de sobrevivência, pelo "
+                "corte de eficiência (ou pela fronteira de Pareto) e pelo teste de robustez ±1 contrato "
+                "-- as carteiras nomeadas abaixo (Conservadora/Equilibrada/Crescimento/Capital-alvo) são "
+                "escolhas DENTRO desta lista, não um filtro adicional escondido."
+            )
+            finalistas = st.session_state.get("builder_finalistas") or []
+            linhas = [
+                {
+                    "Alocação": ", ".join(f"{n}:{v}" for n, v in f["alocacao"].items()),
+                    "Lucro total": fmt(f["lucro_total"], moeda=True),
+                    "MDD": fmt(f["mdd"], moeda=True),
+                    "RLT acumulado": fmt(f["rlt_acumulado"], 4),
+                    "Limiar (capital)": fmt(f["limiar_ativo"], moeda=True),
+                    "Eficiência RLT/MDD": fmt(f["eficiencia_rlt_mdd"], 6),
+                    "Total contratos": f["total_contratos"],
+                }
+                for f in finalistas
+            ]
+            if linhas:
+                st.dataframe(linhas, hide_index=True, width="stretch")
+
+    # Auditoria de exclusão por combinação (pedido de acompanhamento do
+    # usuário: "por que eu deveria acreditar que o filtro está eliminando
+    # as combinações erradas?" -- os contadores agregados na legenda
+    # acima não davam para checar UMA combinação específica). Cada linha
+    # vem de `retornar_excluidos=True` -- motivo real calculado pela
+    # engine, não uma categoria inventada aqui na UI.
+    excluidos = st.session_state.get("builder_excluidos") or []
+    if excluidos:
+        with st.expander(f"Ver as {len(excluidos)} combinação(ões) EXCLUÍDA(S) e por quê"):
+            st.caption(
+                "Toda combinação bruta testada termina numa das duas listas (finalistas acima, ou "
+                "excluídas aqui) -- nenhuma desaparece sem explicação."
+            )
+            rotulos_motivo = {
+                "composicao_duplicada": "Composição duplicada (mesma forma em outra escala)",
+                "max_contratos_total": "Acima do máximo de contratos no total (Passo 3)",
+                "min_robos_ativos": "Abaixo do mínimo de EAs ativos (Passo 3)",
+                "margem_maxima": "Acima da margem máxima",
+                "cluster_max_contratos": "Acima do máximo de contratos por cluster",
+                "sem_janela_comum": "Alocação degenerada ou sem período comum entre os EAs",
+                "perda_diaria_maxima": "Pior dia histórico abaixo do limite",
+                "mdd_maximo": "MDD histórico abaixo do MDD de projeto (Passo 2)",
+                "risco_concentrado": "Um EA/cluster concentrou risco demais no pior drawdown (Passo 3)",
+                "limiar_maximo": "Capital necessário acima do capital reservado (Passo 2)",
+            }
+            motivos_presentes = sorted({e["motivo"] for e in excluidos})
+            motivo_escolhido = st.selectbox(
+                "Filtrar por motivo", ["Todos"] + [rotulos_motivo.get(m, m) for m in motivos_presentes],
+                key="builder_filtro_motivo_exclusao",
+            )
+            rotulo_para_motivo = {v: k for k, v in rotulos_motivo.items()}
+            excluidos_filtrados = (
+                excluidos if motivo_escolhido == "Todos"
+                else [e for e in excluidos if e["motivo"] == rotulo_para_motivo.get(motivo_escolhido, motivo_escolhido)]
+            )
+            limite_exibicao = 300
+            linhas_excluidas = [
+                {
+                    "Alocação": ", ".join(f"{n}:{v}" for n, v in e["alocacao"].items()),
+                    "Motivo": rotulos_motivo.get(e["motivo"], e["motivo"]),
+                }
+                for e in excluidos_filtrados[:limite_exibicao]
+            ]
+            if len(excluidos_filtrados) > limite_exibicao:
+                st.caption(f"Mostrando {limite_exibicao} de {len(excluidos_filtrados)} -- refine o filtro para ver outras.")
+            st.dataframe(linhas_excluidas, hide_index=True, width="stretch")
 
     shortlist = st.session_state.get("builder_shortlist")
     if shortlist:
@@ -1980,7 +2282,14 @@ def _builder_passo5_candidatos():
             ("Equilibrada", "balanced", "Melhor compromisso entre retorno, drawdown e robustez."),
             ("Crescimento", "growth", "Maior retorno entre as soluções que respeitam seu orçamento."),
         ]
-        cols = st.columns(3)
+        if "capital_alvo" in shortlist:
+            cartas.append((
+                "Capital-alvo", "capital_alvo",
+                f"Maior retorno entre as soluções que usam até {fmt(capital_alvo, moeda=True)} de capital "
+                "(seu capital reservado no Passo 2) -- não necessariamente a que mais se aproxima desse "
+                "valor, a que rende mais dentro dele.",
+            ))
+        cols = st.columns(len(cartas))
         for col, (rotulo, chave, motivo) in zip(cols, cartas):
             r = shortlist.get(chave)
             with col:
@@ -1993,8 +2302,15 @@ def _builder_passo5_candidatos():
                     continue
                 for nome, v in r["alocacao"].items():
                     st.caption(f"{nome}: {v} contrato(s)")
+                st.metric("Lucro total", fmt(r["lucro_total"], moeda=True))
                 st.metric("RLT histórico", fmt(r["rlt_acumulado"], 4))
                 st.metric("MDD histórico", fmt(r["mdd"], moeda=True))
+                st.metric("Capital necessário (limiar)", fmt(r["limiar_ativo"], moeda=True))
+                subcol1, subcol2 = st.columns(2)
+                subcol1.metric("Sharpe", fmt(r["sharpe"], 2))
+                subcol1.metric("Calmar", fmt(r["calmar"], 2))
+                subcol2.metric("Sortino", fmt(r["sortino"], 2))
+                subcol2.metric("TUW máx. (dias)", fmt(r["tuw_max"], 0))
                 st.caption(f"Por quê: {motivo}")
                 if st.button("Escolher esta carteira", key=f"builder_escolher::{chave}"):
                     st.session_state["builder_candidato_escolhido"] = {**r, "perfil": rotulo}
@@ -2166,6 +2482,19 @@ def _builder_passo7_plano_operacional():
     st.markdown("### PORTFÓLIO ESCOLHIDO")
     for nome, v in plano["alocacao_final"].items():
         st.caption(f"{nome}: {v} contrato(s)")
+
+    st.markdown("**Desempenho histórico da carteira escolhida**")
+    colh1, colh2, colh3, colh4 = st.columns(4)
+    colh1.metric("Lucro total", fmt(candidato.get("lucro_total"), moeda=True))
+    colh2.metric("RLT acumulado", fmt(candidato.get("rlt_acumulado"), 4))
+    colh3.metric("Sharpe", fmt(candidato.get("sharpe"), 2))
+    colh4.metric("Sortino", fmt(candidato.get("sortino"), 2))
+    colh5, colh6, colh7, colh8 = st.columns(4)
+    colh5.metric("Calmar", fmt(candidato.get("calmar"), 2))
+    colh6.metric("TUW máximo (dias)", fmt(candidato.get("tuw_max"), 0))
+    colh7.metric("MDD histórico", fmt(candidato.get("mdd"), moeda=True))
+    colh8.metric("Capital necessário (limiar)", fmt(candidato.get("limiar_ativo"), moeda=True))
+
     if diarios_ativos:
         st.markdown("**Lucro/prejuízo por semana e por mês**")
         _grafico_lucro_por_periodo(serie_combinada(largo_escolhido), "builder_lucro_periodo")
@@ -2334,12 +2663,24 @@ else:
                 ordens, dias_recentes=int(dias_recentes_deteccao)
             )
             deteccao_por_ativo = contratos_referencia_por_ativo(ordens, dias_recentes=int(dias_recentes_deteccao))
-        except ValueError as erro:
-            st.error(
-                f"Não foi possível determinar a configuração de contratos, nem por ativo "
-                f"sobre os últimos {int(dias_recentes_deteccao)} dias: {erro}"
-            )
-            st.stop()
+        except ValueError:
+            # Nem quantidade dominante nem proporção fixa entre pernas --
+            # tenta o padrão de piramidação (robô tipo "Flecha": reforça a
+            # mesma posição em várias pernas de 'entrada' antes de uma
+            # única saída grande).
+            try:
+                contratos_referencia = detectar_contratos_referencia_piramide(ordens)
+                with st.sidebar:
+                    st.info(
+                        f"Padrão de piramidação detectado -- contratos de referência = "
+                        f"{contratos_referencia} (menor unidade de reforço recorrente)."
+                    )
+            except ValueError as erro:
+                st.error(
+                    f"Não foi possível determinar a configuração de contratos, nem por ativo "
+                    f"sobre os últimos {int(dias_recentes_deteccao)} dias, nem como piramidação: {erro}"
+                )
+                st.stop()
 
 with st.sidebar:
     st.header("Filtros")

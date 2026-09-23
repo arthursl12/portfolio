@@ -11,8 +11,10 @@ import report
 from tradefolio.alignment import preencher_calendario_b3
 from tradefolio.daily import agregar_diario, detectar_contratos_referencia
 
-CSV_EXEMPLO = "tests/fixtures/romanos_orders.csv"
-OUT_PATH = "lamina_exemplo.html"
+# CSV_EXEMPLO = "tests/fixtures/romanos_orders.csv"
+CSV_EXEMPLO = "dados_exemplo/orders_romanos2.csv"
+
+OUT_PATH = "orders_romanos2.html"
 
 if __name__ == "__main__":
     ordens = report.carregar_ordens(CSV_EXEMPLO)
