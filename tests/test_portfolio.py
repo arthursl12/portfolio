@@ -41,6 +41,8 @@ limiar agregado R$19.500 vs. soma dos limiares individuais R$25.500
 """
 import warnings
 
+import itertools
+
 import pandas as pd
 import pytest
 
@@ -801,6 +803,10 @@ _MARGENS_DEDUPE = {"resgat": 1000.0, "gridhedge": 5000.0}
 
 
 def test_buscar_combinacoes_portfolio_com_filtros_dedupe_composicao():
+    # Regra revista (pedido do usuário): dentro de cada composição, sobrevive a
+    # MAIOR escala que passa em todos os filtros -- resultados em R$ (lucro,
+    # MDD, limiar) diferem entre escalas, e o teto de risco é que limita a
+    # escala, não o dedupe. Sem nenhum teto, é a maior escala candidata.
     diarios = {k: v for k, v in _diarios_reais().items() if k in ("resgat", "gridhedge")}
     resultado = buscar_combinacoes_portfolio_com_filtros(
         diarios, _MARGENS_DEDUPE, _CANDIDATOS_DEDUPE, deduplicar_composicao=True,
@@ -813,21 +819,44 @@ def test_buscar_combinacoes_portfolio_com_filtros_dedupe_composicao():
 
     alocacoes = [r["alocacao"] for r in resultado["resultados"]]
     esperadas = [
-        {"resgat": 0, "gridhedge": 1},
-        {"resgat": 1, "gridhedge": 0},
-        {"resgat": 1, "gridhedge": 1},
+        {"resgat": 0, "gridhedge": 2},
+        {"resgat": 4, "gridhedge": 0},
+        {"resgat": 2, "gridhedge": 2},
         {"resgat": 1, "gridhedge": 2},
-        {"resgat": 2, "gridhedge": 1},
+        {"resgat": 4, "gridhedge": 2},
         {"resgat": 4, "gridhedge": 1},
     ]
     for esperada in esperadas:
         assert esperada in alocacoes
-    # as versões escaladas NÃO devem sobreviver -- só a de menor escala.
-    assert {"resgat": 0, "gridhedge": 2} not in alocacoes
-    assert {"resgat": 2, "gridhedge": 0} not in alocacoes
-    assert {"resgat": 4, "gridhedge": 0} not in alocacoes
+    # as versões de menor escala NÃO sobrevivem quando uma maior passou.
+    assert {"resgat": 0, "gridhedge": 1} not in alocacoes
+    assert {"resgat": 1, "gridhedge": 0} not in alocacoes
+    assert {"resgat": 1, "gridhedge": 1} not in alocacoes
+    assert {"resgat": 2, "gridhedge": 1} not in alocacoes
+    # ordem original de `combinacoes_brutas` preservada
+    ordem_bruta = [
+        dict(zip(("resgat", "gridhedge"), c))
+        for c in itertools.product(*[_CANDIDATOS_DEDUPE[n] for n in ("resgat", "gridhedge")])
+    ]
+    assert alocacoes == [a for a in ordem_bruta if a in alocacoes]
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_dedupe_respeita_teto_de_margem():
+    # margem: resgat 1000, gridhedge 5000. Teto 7000 elimina [2,2] (12000) mas
+    # [1,1] (6000) cabe -- a composição (1,1) NÃO pode sumir por causa do dedupe.
+    diarios = {k: v for k, v in _diarios_reais().items() if k in ("resgat", "gridhedge")}
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_DEDUPE, _CANDIDATOS_DEDUPE, deduplicar_composicao=True,
+        margem_maxima=7000.0, retornar_excluidos=True,
+    )
+    alocacoes = [r["alocacao"] for r in resultado["resultados"]]
+    assert {"resgat": 1, "gridhedge": 1} in alocacoes
     assert {"resgat": 2, "gridhedge": 2} not in alocacoes
-    assert {"resgat": 4, "gridhedge": 2} not in alocacoes
+    assert {"resgat": 0, "gridhedge": 1} in alocacoes  # [0,2] = 10000 > teto
+    assert {"resgat": 0, "gridhedge": 2} not in alocacoes
+    motivos = {tuple(e["alocacao"].values()): e["motivo"] for e in resultado["excluidos"]}
+    assert motivos[(2, 2)] == "margem_maxima"
+    assert len(resultado["excluidos"]) + resultado["n_avaliadas"] == resultado["n_combinacoes_totais"]
 
 
 def test_buscar_combinacoes_portfolio_com_filtros_sobrevivencia():
@@ -1020,6 +1049,29 @@ def test_buscar_combinacoes_portfolio_com_filtros_mdd_maximo():
     assert {"resgat": 6, "gridhedge": 1, "romanos2": 2} not in alocacoes
 
 
+# --- Capital-alvo / limiar_maximo (pedido de acompanhamento do usuário:
+# "encontrar o melhor portfólio com capital X", i.e. limiar próximo de
+# X). Decisão confirmada: X é o `limiar_ativo` já calculado por
+# `_metricas_de_alocacao` (não margem bruta, que já tem seu próprio
+# filtro em `margem_maxima`) -- TETO RÍGIDO (nunca ultrapassar X), sem
+# banda de tolerância. Filtrado DEPOIS de `_metricas_de_alocacao` rodar
+# (limiar_ativo só existe depois -- diferente de mdd_maximo/perda_diaria_
+# maxima, que são calculados cedo para evitar aquele custo; aqui o custo
+# já foi pago de qualquer forma, computar limiar_agregado_portfolio é
+# parte do pipeline normal). Valores conferidos por script.
+def test_buscar_combinacoes_portfolio_com_filtros_limiar_maximo():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        limiar_maximo=15000.0, **_PARAMS_10_8,
+    )
+    assert resultado["n_puladas_limiar"] == 3
+    assert resultado["n_avaliadas"] == 8
+    for r in resultado["resultados"]:
+        assert r["limiar_ativo"] <= 15000.0
+    assert {"resgat": 6, "gridhedge": 1, "romanos2": 2} not in [r["alocacao"] for r in resultado["resultados"]]
+
+
 def test_buscar_combinacoes_portfolio_com_filtros_equivale_a_busca_original_sem_filtros():
     # Sem nenhum filtro/dedupe ligado, deve reproduzir EXATAMENTE
     # buscar_combinacoes_portfolio -- é o MESMO pipeline por combinação,
@@ -1043,6 +1095,149 @@ def test_buscar_combinacoes_portfolio_com_filtros_excede_limite_levanta_erro():
         buscar_combinacoes_portfolio_com_filtros(
             diarios, _MARGENS_POR_CONTRATO_10_8, candidatos_grandes,
         )
+
+
+# --- Progresso e confirmação explícita para buscas grandes (pedido de
+# acompanhamento do usuário: "em vez de um limite fixo que só levanta
+# erro, me diga quantas combinações existem e uma estimativa de tempo --
+# se eu quiser continuar mesmo assim, eu decido"). `_LIMITE_COMBINACOES_
+# OTIMIZACAO` deixa de ser um teto INTRANSPONÍVEL e passa a ser só o
+# limiar que exige confirmação explícita -- comportamento OPT-IN
+# (`confirmar_combinacoes_grandes=True`), então todo código existente que
+# não passa esse parâmetro continua vendo o `ValueError` de antes (o
+# teste acima permanece válido sem alteração). `progress_callback`
+# (pedido de acompanhamento do usuário: uma barra de progresso, tipo
+# tqdm) é chamado UMA VEZ por combinação sobrevivente aos filtros
+# baratos (mesmo ponto do laço que já paga o custo de `_sincronizar_
+# alocacao`/`_metricas_de_alocacao` -- é isso que demora), com
+# `(processadas, total)` -- é o suficiente para a UI montar uma barra de
+# progresso E, cronometrando o tempo entre chamadas, uma estimativa de
+# tempo restante (tipo tqdm) sem a engine precisar saber nada sobre
+# tempo/UI (fica em app.py, camada de apresentação -- AGENTS.md §16/17).
+def test_buscar_combinacoes_portfolio_com_filtros_confirmar_combinacoes_grandes_bypassa_limite(monkeypatch):
+    import tradefolio.portfolio as portfolio_mod
+    monkeypatch.setattr(portfolio_mod, "_LIMITE_COMBINACOES_OTIMIZACAO", 5)
+
+    diarios = _diarios_reais()
+    # sem confirmar: mesmo comportamento de sempre (ValueError).
+    with pytest.raises(ValueError, match="excede o limite"):
+        buscar_combinacoes_portfolio_com_filtros(
+            diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_10_8,
+        )
+
+    # confirmando explicitamente: roda normalmente, MESMO resultado de
+    # antes deste parâmetro existir (equivalência com o teste de
+    # "reproduz buscar_combinacoes_portfolio" já existente).
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        confirmar_combinacoes_grandes=True, **_PARAMS_10_8,
+    )
+    assert resultado["n_avaliadas"] == 11
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_chama_progress_callback():
+    diarios = _diarios_reais()
+    chamadas = []
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        progress_callback=lambda processadas, total: chamadas.append((processadas, total)),
+        **_PARAMS_10_8,
+    )
+    assert chamadas, "progress_callback nunca foi chamado"
+    # uma chamada por combinação que chega ao laço caro (pós-dedupe/
+    # max_contratos_total, que aqui não estão ligados -- todas as 12
+    # brutas chegam lá).
+    assert len(chamadas) == 12
+    # contagem crescente de 1 até o total, total constante e igual ao nº
+    # de chamadas -- mesmo contrato que uma barra de progresso precisa.
+    assert [c[0] for c in chamadas] == list(range(1, 13))
+    assert all(c[1] == 12 for c in chamadas)
+    assert resultado["n_avaliadas"] == 11
+
+
+# --- Motivo de exclusão por combinação (pedido de acompanhamento do
+# usuário: "por que eu deveria acreditar que o filtro de sobrevivência
+# está eliminando as combinações erradas?" -- as contagens agregadas
+# (n_puladas_*) já existiam, mas não davam para checar UMA combinação
+# específica. `retornar_excluidos=True` (padrão `False` -- preserva o
+# formato do dict de retorno byte a byte para quem não pede, mesma
+# convenção de `fronteira_pareto`'s `_agrupados`) acrescenta `"excluidos"`:
+# uma entrada por combinação REJEITADA, com `alocacao` e `motivo`
+# (string). Os motivos são mais granulares que os contadores agregados
+# só para `n_puladas_sobrevivencia` -- esse contador já lumpava min_robos_
+# ativos/margem_maxima/max_contratos_total, mas "por que ESTA foi
+# excluída" precisa da razão específica, não só do balde agregado -- daí
+# a soma de `min_robos_ativos`+`margem_maxima`+`max_contratos_total`
+# bater com `n_puladas_sobrevivencia`, verificado abaixo como invariante.
+# Descoberta ao implementar isto: o caso "sem janela comum" (`largo is
+# None`) nunca tinha contador NENHUM -- combinações que caem nesse `continue`
+# desapareciam silenciosamente, sem aparecer em nenhuma contagem. Corrigido
+# junto (`n_puladas_sem_janela_comum`), incondicional (não atrás do opt-in),
+# porque é a mesma classe de "sumiço silencioso" que motivou este pedido.
+def test_buscar_combinacoes_portfolio_com_filtros_sem_retornar_excluidos_mantem_formato_antigo():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        max_contratos_total=5, min_robos_ativos=2, mdd_maximo=-3000.0, **_PARAMS_10_8,
+    )
+    assert "excluidos" not in resultado
+    assert resultado["n_puladas_sem_janela_comum"] == 0
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_retornar_excluidos_da_motivo_por_combinacao():
+    diarios = _diarios_reais()
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        max_contratos_total=5, min_robos_ativos=2, mdd_maximo=-3000.0,
+        retornar_excluidos=True, **_PARAMS_10_8,
+    )
+    excluidos = resultado["excluidos"]
+    # toda combinação bruta aparece OU em resultados OU em excluidos,
+    # nunca as duas nem nenhuma -- nada some silenciosamente.
+    assert len(excluidos) + resultado["n_avaliadas"] == resultado["n_combinacoes_totais"]
+    for e in excluidos:
+        assert set(e.keys()) == {"alocacao", "motivo"}
+        assert isinstance(e["alocacao"], dict)
+
+    motivos_validos = {
+        "composicao_duplicada", "max_contratos_total", "min_robos_ativos", "margem_maxima",
+        "cluster_max_contratos", "sem_janela_comum", "perda_diaria_maxima", "mdd_maximo",
+        "risco_concentrado", "limiar_maximo",
+    }
+    contagem_por_motivo = {}
+    for e in excluidos:
+        assert e["motivo"] in motivos_validos
+        contagem_por_motivo[e["motivo"]] = contagem_por_motivo.get(e["motivo"], 0) + 1
+
+    # invariante: a soma dos motivos que compõem "sobrevivência" bate
+    # exatamente com o contador agregado já existente.
+    soma_sobrevivencia = (
+        contagem_por_motivo.get("min_robos_ativos", 0)
+        + contagem_por_motivo.get("margem_maxima", 0)
+        + contagem_por_motivo.get("max_contratos_total", 0)
+    )
+    assert soma_sobrevivencia == resultado["n_puladas_sobrevivencia"]
+    assert contagem_por_motivo.get("mdd_maximo", 0) == resultado["n_puladas_mdd"]
+    assert "mdd_maximo" in contagem_por_motivo
+
+
+def test_buscar_combinacoes_portfolio_com_filtros_excluidos_cobre_dedupe_e_cluster_e_limiar():
+    diarios = _diarios_reais()
+    # Com o dedupe depois dos tetos (maior escala que passa), um cap de cluster
+    # muito baixo elimina todas as escalas e nada vira "duplicada": cluster de
+    # 6 contratos e limiar 12000 deixam algumas composições com 2 escalas que
+    # passam, e só a maior sobrevive.
+    clusters = [["resgat", "gridhedge"], ["romanos2"]]
+    resultado = buscar_combinacoes_portfolio_com_filtros(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        deduplicar_composicao=True, clusters=clusters, max_contratos_por_cluster=6,
+        limiar_maximo=12000.0, retornar_excluidos=True, **_PARAMS_10_8,
+    )
+    motivos = {e["motivo"] for e in resultado["excluidos"]}
+    assert "composicao_duplicada" in motivos
+    assert "cluster_max_contratos" in motivos
+    assert "limiar_maximo" in motivos
+    assert len(resultado["excluidos"]) + resultado["n_avaliadas"] == resultado["n_combinacoes_totais"]
 
 
 # --- Funil de seleção em 4 camadas (backlog de prompts/otimizacao.pdf §6,
@@ -1100,6 +1295,54 @@ def test_funil_selecao_portfolio_encaminha_max_contratos_total_e_mdd_maximo():
         assert r["mdd"] >= -3000.0
 
 
+def test_funil_selecao_portfolio_encaminha_limiar_maximo():
+    diarios = _diarios_reais()
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        limiar_maximo=15000.0, **_PARAMS_FUNIL,
+    )
+    camada1 = funil["camada1_sobrevivencia"]
+    assert camada1["n_puladas_limiar"] == 3
+    assert camada1["n_avaliadas"] == 8
+    for r in camada1["resultados"]:
+        assert r["limiar_ativo"] <= 15000.0
+
+
+def test_funil_selecao_portfolio_encaminha_progress_callback_e_confirmar_combinacoes_grandes(monkeypatch):
+    import tradefolio.portfolio as portfolio_mod
+    monkeypatch.setattr(portfolio_mod, "_LIMITE_COMBINACOES_OTIMIZACAO", 5)
+
+    diarios = _diarios_reais()
+    with pytest.raises(ValueError, match="excede o limite"):
+        funil_selecao_portfolio(diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_FUNIL)
+
+    chamadas = []
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        confirmar_combinacoes_grandes=True,
+        progress_callback=lambda processadas, total: chamadas.append((processadas, total)),
+        **_PARAMS_FUNIL,
+    )
+    assert chamadas == [(i, 12) for i in range(1, 13)]
+    assert funil["camada1_sobrevivencia"]["n_avaliadas"] == 11
+
+
+def test_funil_selecao_portfolio_encaminha_retornar_excluidos():
+    diarios = _diarios_reais()
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        max_contratos_total=5, retornar_excluidos=True, **_PARAMS_FUNIL,
+    )
+    camada1 = funil["camada1_sobrevivencia"]
+    assert "excluidos" in camada1
+    assert len(camada1["excluidos"]) + camada1["n_avaliadas"] == camada1["n_combinacoes_totais"]
+    motivos = {e["motivo"] for e in camada1["excluidos"]}
+    # 5 combinações cortadas pelo teto de contratos, e a alocação
+    # degenerada (tudo 0) cai em "sem_janela_comum" (não tem o que
+    # sincronizar) -- não em "max_contratos_total", já que 0 <= 5.
+    assert motivos == {"max_contratos_total", "sem_janela_comum"}
+
+
 def test_funil_selecao_portfolio_camada2_eficiencia():
     diarios = _diarios_reais()
     funil = funil_selecao_portfolio(
@@ -1115,6 +1358,58 @@ def test_funil_selecao_portfolio_camada2_eficiencia():
     assert camada2[0]["eficiencia_rlt_mdd"] == pytest.approx(0.0015381976514051985, abs=1e-8)
     assert alocacoes_camada2[-1] == {"resgat": 3, "gridhedge": 1, "romanos2": 2}
     # ordem estritamente decrescente por eficiência.
+    assert [r["eficiencia_rlt_mdd"] for r in camada2] == sorted(
+        [r["eficiencia_rlt_mdd"] for r in camada2], reverse=True,
+    )
+    # com top_n_eficiencia=5 a fronteira de Pareto (rlt_acumulado x mdd,
+    # só {resgat:6,gridhedge:0,romanos2:0} e {resgat:3,gridhedge:0,
+    # romanos2:0} -- conferido por script) já está inteira dentro do
+    # top-5 por eficiência -- nenhuma entrada extra deveria ter sido
+    # necessária aqui.
+    assert all(r["preservado_pela_fronteira"] is False for r in camada2)
+
+
+def test_funil_selecao_portfolio_camada2_preserva_fronteira_pareto_truncada():
+    # Bug de transparência: com top_n_eficiencia=3, a camada 2 mantinha
+    # SÓ os 3 melhores por eficiência RLT/|MDD| -- ranqueamento por uma
+    # única razão. {"resgat": 6, "gridhedge": 0, "romanos2": 0} é o
+    # 4º colocado nessa razão (eficiência menor porque tem MDD maior),
+    # mas é Pareto-ótimo (maior RLT E maior |lucro| entre TODOS os 11
+    # sobreviventes -- conferido por script: fronteira_pareto(resultados,
+    # "rlt_acumulado", "mdd") == só esta alocação e a de resgat=3
+    # sozinho). Truncar por eficiência ANTES de checar a fronteira
+    # descartava essa carteira sem o usuário nunca saber que ela existia
+    # -- exatamente o tipo de "melhor alternativa escondida" que motivou
+    # este teste. A fronteira inteira precisa sobreviver à camada 2,
+    # mesmo que isso amplie a lista além de top_n_eficiencia.
+    diarios = _diarios_reais()
+    funil = funil_selecao_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8,
+        top_n_eficiencia=3, tolerancia_robustez_pct=20.0, **_PARAMS_FUNIL,
+    )
+    camada2 = funil["camada2_eficiencia"]
+    alocacoes_camada2 = [r["alocacao"] for r in camada2]
+
+    # os 3 melhores por eficiência continuam presentes.
+    for esperada in [
+        {"resgat": 3, "gridhedge": 0, "romanos2": 0},
+        {"resgat": 0, "gridhedge": 0, "romanos2": 2},
+        {"resgat": 3, "gridhedge": 0, "romanos2": 2},
+    ]:
+        assert esperada in alocacoes_camada2
+    # e a Pareto-ótima que o corte por eficiência teria descartado
+    # também está -- essa é a garantia nova.
+    assert {"resgat": 6, "gridhedge": 0, "romanos2": 0} in alocacoes_camada2
+    assert len(camada2) == 4
+
+    por_alocacao = {tuple(sorted(r["alocacao"].items())): r for r in camada2}
+    extra = por_alocacao[tuple(sorted({"resgat": 6, "gridhedge": 0, "romanos2": 0}.items()))]
+    assert extra["preservado_pela_fronteira"] is True
+    normal = por_alocacao[tuple(sorted({"resgat": 3, "gridhedge": 0, "romanos2": 0}.items()))]
+    assert normal["preservado_pela_fronteira"] is False
+
+    # ordem continua estritamente decrescente por eficiência (a entrada
+    # extra entra na posição que sua eficiência dita, não vai ao fim).
     assert [r["eficiencia_rlt_mdd"] for r in camada2] == sorted(
         [r["eficiencia_rlt_mdd"] for r in camada2], reverse=True,
     )
@@ -1291,6 +1586,86 @@ def test_shortlist_portfolio_minimum_risk_e_growth():
     assert shortlist["growth"]["lucro_total"] == pytest.approx(28268.5, abs=1e-2)
 
 
+# Sharpe/Sortino/Calmar/TUW nas carteiras finais (pedido de
+# acompanhamento do usuário: o Builder calculava lucro/MDD/ES/RLT por
+# candidata mas nunca expunha essas 4 -- Sharpe/Sortino/Calmar não
+# existiam em NENHUM lugar do código de portfólio, só no modo Robô
+# único). Escopo CONFIRMADO com o usuário: só nas ~poucas carteiras que
+# `shortlist_portfolio` retorna (minimum_risk/growth/balanced/
+# handcrafted_risk/contratos_iguais/risco_inverso/carteira_atual), não
+# em toda combinação sobrevivente do funil -- calcular para centenas de
+# sobreviventes seria caro e ninguém olha esses números fora das
+# finalistas. Reusa `metrics.sharpe`/`metrics.sortino`/`metrics.calmar`
+# (mesmas fórmulas do robô único, já testadas em test_metrics.py) sobre
+# `serie_combinada(largo)` -- nenhuma fórmula nova, só uma aplicação em
+# cima da série já sincronizada. `tuw_max` já era calculado por
+# `metricas_agregadas` mas descartado ao montar o resultado da busca --
+# aqui só para de descartar. Valores conferidos por script (mesmo
+# `_sincronizar_alocacao` usado internamente) antes deste teste.
+def test_shortlist_portfolio_expoe_sharpe_sortino_calmar_tuw():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        retorno_minimo=15000.0, risco_maximo=-3000.0, **_PARAMS_SHORTLIST,
+    )
+    minimum_risk = shortlist["minimum_risk"]
+    assert minimum_risk["tuw_max"] == pytest.approx(102.0)
+    assert minimum_risk["sharpe"] == pytest.approx(2.18966108, abs=1e-6)
+    assert minimum_risk["sortino"] == pytest.approx(3.45263458, abs=1e-6)
+    assert minimum_risk["calmar"] == pytest.approx(3.39939143, abs=1e-6)
+
+    growth = shortlist["growth"]
+    assert growth["tuw_max"] == pytest.approx(24.0)
+    assert growth["sharpe"] == pytest.approx(2.71086682, abs=1e-6)
+    assert growth["sortino"] == pytest.approx(7.05032807, abs=1e-6)
+    assert growth["calmar"] == pytest.approx(8.25347273, abs=1e-6)
+
+
+def test_shortlist_portfolio_capital_alvo_maximiza_retorno_dentro_do_teto():
+    # "Melhor portfólio com capital próximo de X": entre as combinações
+    # cujo limiar_ativo <= capital_alvo (teto rígido, nunca ultrapassa
+    # X), a de maior eixo_retorno -- mesmo idioma já usado por "growth"
+    # (maior retorno sujeito a um teto), só trocando o eixo de risco pelo
+    # limiar. Não força usar TODO o capital_alvo -- se uma combinação
+    # mais barata tem retorno maior, ela vence (nenhum viés de "gastar
+    # tudo" escondido na definição de "melhor"). Valores conferidos por
+    # script: com capital_alvo=15000, 8 das 11 sobreviventes têm
+    # limiar_ativo <= 15000, e a de maior lucro_total entre elas é
+    # {resgat:6} (limiar 10.500, lucro R$34.974) -- NÃO a mais próxima de
+    # 15.000 (que seria {resgat:6,romanos2:2}, limiar 15.000, lucro
+    # menor).
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        capital_alvo=15000.0, **_PARAMS_SHORTLIST,
+    )
+    capital_alvo = shortlist["capital_alvo"]
+    assert capital_alvo["alocacao"] == {"resgat": 6, "gridhedge": 0, "romanos2": 0}
+    assert capital_alvo["limiar_ativo"] == pytest.approx(10500.0)
+    assert capital_alvo["lucro_total"] == pytest.approx(34974.0, abs=1e-2)
+    assert capital_alvo["limiar_ativo"] <= 15000.0
+    for campo in ("tuw_max", "sharpe", "sortino", "calmar"):
+        assert campo in capital_alvo
+
+
+def test_shortlist_portfolio_sem_capital_alvo_nao_inclui_a_chave():
+    diarios = _diarios_reais()
+    resultados = buscar_combinacoes_portfolio(
+        diarios, _MARGENS_POR_CONTRATO_10_8, _CANDIDATOS_10_8, **_PARAMS_SHORTLIST,
+    )
+    shortlist = shortlist_portfolio(
+        resultados, diarios, _MARGENS_POR_CONTRATO_10_8, total_contratos_benchmark=12,
+        **_PARAMS_SHORTLIST,
+    )
+    assert "capital_alvo" not in shortlist
+
+
 def test_shortlist_portfolio_balanced_e_ponto_da_fronteira():
     diarios = _diarios_reais()
     resultados = buscar_combinacoes_portfolio(
@@ -1303,6 +1678,10 @@ def test_shortlist_portfolio_balanced_e_ponto_da_fronteira():
     assert shortlist["balanced"]["alocacao"] == {"resgat": 3, "gridhedge": 1, "romanos2": 2}
     fronteira = fronteira_pareto(resultados, "lucro_total", "mdd")
     assert shortlist["balanced"]["alocacao"] in [r["alocacao"] for r in fronteira]
+    assert shortlist["balanced"]["tuw_max"] == pytest.approx(28.0)
+    assert shortlist["balanced"]["sharpe"] == pytest.approx(2.97837472, abs=1e-6)
+    assert shortlist["balanced"]["sortino"] == pytest.approx(6.03545129, abs=1e-6)
+    assert shortlist["balanced"]["calmar"] == pytest.approx(8.61621791, abs=1e-6)
 
 
 def test_shortlist_portfolio_handcrafted_risk_um_voto_por_cluster():
@@ -1337,6 +1716,12 @@ def test_shortlist_portfolio_risco_inverso_e_contratos_iguais():
     # diferente de contratos iguais, exatamente por isso é um benchmark
     # distinto.
     assert shortlist["risco_inverso"]["alocacao"] == {"resgat": 4, "gridhedge": 5, "romanos2": 3}
+    # benchmarks passam pelo mesmo _avaliar() dos perfis nomeados --
+    # também precisam ter Sharpe/Sortino/Calmar/TUW para comparação
+    # direta com minimum_risk/growth/balanced na UI.
+    for chave in ("contratos_iguais", "risco_inverso"):
+        for campo in ("tuw_max", "sharpe", "sortino", "calmar"):
+            assert campo in shortlist[chave]
 
 
 def test_shortlist_portfolio_carteira_atual_quando_informada():

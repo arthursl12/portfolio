@@ -992,17 +992,31 @@ def _sincronizar_alocacao(
 def _metricas_de_alocacao(
     alocacao: dict, largo: pd.DataFrame, margens_ativas: dict,
     percentil_cauda: int, fracao_reserva_operacional: float, increment: float,
+    incluir_metricas_estendidas: bool = False,
 ) -> dict:
     """Métricas CARAS para uma alocação já sincronizada (`largo` de
     `_sincronizar_alocacao`) -- mesmo formato de resultado de
-    `buscar_combinacoes_portfolio`."""
+    `buscar_combinacoes_portfolio`.
+
+    `incluir_metricas_estendidas` (pedido de acompanhamento do usuário):
+    acrescenta `tuw_max`/`sharpe`/`sortino`/`calmar` -- `tuw_max` já era
+    calculado por `metricas_agregadas` e descartado aqui; Sharpe/Sortino/
+    Calmar não existiam para portfólio nenhum lugar do código (só no modo
+    Robô único), reusados de `metrics.sharpe`/`sortino`/`calmar` (mesmas
+    fórmulas, `DIAS_UTEIS_ANO` já padrão) sobre `serie_combinada(largo)`
+    -- nenhuma fórmula nova. Padrão `False` e OPT-IN, não automático:
+    esta função roda por CADA sobrevivente do funil de seleção (potencial-
+    mente centenas), e Sharpe/Sortino pedem `serie_combinada` de novo
+    (barato, mas não grátis em escala) -- decisão confirmada com o
+    usuário de escopo restrito à shortlist/carteira escolhida, não a toda
+    combinação avaliada."""
     agregadas = metricas_agregadas(largo)
     limiar = limiar_agregado_portfolio(
         largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
     )
     limiar_ativo = limiar.get("limiar_recomendado", limiar["limiar_bruto"])
     rlt = rlt_e_risco_portfolio(largo, limiar=limiar_ativo)
-    return {
+    resultado = {
         "alocacao": alocacao,
         "lucro_total": agregadas["lucro_total"],
         "mdd": agregadas["mdd"],
@@ -1011,6 +1025,15 @@ def _metricas_de_alocacao(
         "rlt_acumulado": rlt["rlt_acumulado"],
         "mdd_sobre_limiar": rlt["mdd_sobre_limiar"],
     }
+    if incluir_metricas_estendidas:
+        combinada = serie_combinada(largo)
+        resultado.update({
+            "tuw_max": agregadas["tuw_max"],
+            "sharpe": metrics.sharpe(combinada),
+            "sortino": metrics.sortino(combinada),
+            "calmar": metrics.calmar(combinada, agregadas["mdd"]),
+        })
+    return resultado
 
 
 def buscar_combinacoes_portfolio_com_filtros(
@@ -1031,6 +1054,10 @@ def buscar_combinacoes_portfolio_com_filtros(
     limite_risco_por_robo_pct: float = None,
     limite_risco_por_cluster_pct: float = None,
     mdd_maximo: float = None,
+    limiar_maximo: float = None,
+    confirmar_combinacoes_grandes: bool = False,
+    progress_callback: callable = None,
+    retornar_excluidos: bool = False,
 ) -> dict:
     """Backlog de `prompts/otimizacao.pdf` (fora dos épicos do PDF-fonte):
     variante de `buscar_combinacoes_portfolio` com um funil de filtros
@@ -1045,11 +1072,17 @@ def buscar_combinacoes_portfolio_com_filtros(
     em camadas para permitir podar combinações ANTES de chegar nele:
 
     1. `deduplicar_composicao=True`: `[2,2]` é a MESMA composição que
-       `[1,1]` em outra escala (reduz cada vetor de contratos pelo MDC) --
-       mantém só a combinação de MENOR escala por composição
-       (documento-fonte §13: "escolha a menor escala que represente
-       razoavelmente"). Puramente combinatório, não toca nenhum dado --
-       roda antes de qualquer outro filtro.
+       `[1,1]` em outra escala (reduz cada vetor de contratos pelo MDC),
+       mas NÃO o mesmo resultado: lucro/MDD/ES/limiar/margem (R$) escalam
+       com os contratos e o custo mensal por faixa nem é linear. Por isso
+       o dedupe é DEPOIS dos tetos de risco: por composição, avalia da
+       maior escala para a menor e mantém a MAIOR que passa em todos os
+       filtros (`margem_maxima`, `mdd_maximo`, `limiar_maximo`, ...);
+       as menores dessa composição são puladas (`composicao_duplicada`,
+       sem custo de cálculo). Uma composição só some se NENHUMA escala
+       passa. Antes (menor escala, antes dos filtros) o dedupe podia
+       descartar a única escala que cabia no orçamento de risco.
+       `resultados` mantém a ordem original das combinações.
     2. `min_robos_ativos`/`margem_maxima`/`max_contratos_por_cluster`/
        `max_contratos_total`: filtros baratos calculados só a partir da
        alocação (quantos candidatos são > 0, margem = margem_por_contrato
@@ -1096,6 +1129,64 @@ def buscar_combinacoes_portfolio_com_filtros(
        MDD que a busca já calcula por candidato; o custo caro de
        `contribuicao_risco_por_robo` vem de RESSINCRONIZAR, evitado aqui
        porque `largo` já está pronto neste ponto do laço.
+    5. `limiar_maximo` (pedido de acompanhamento do usuário: "melhor
+       portfólio com capital próximo de X" -- confirmado que X é o
+       `limiar_ativo`, não a margem bruta, que já tem seu próprio filtro
+       em `margem_maxima`): TETO RÍGIDO, descarta a combinação se
+       `resultado["limiar_ativo"] > limiar_maximo`. Diferente de
+       `mdd_maximo`/`perda_diaria_maxima` (calculados cedo, ANTES de
+       `_metricas_de_alocacao`, para nem pagar aquele custo) -- o limiar
+       só existe DEPOIS de `_metricas_de_alocacao` rodar (é ela quem
+       chama `limiar_agregado_portfolio`), então este filtro checa o
+       resultado já calculado em vez de evitar o cálculo.
+
+    `confirmar_combinacoes_grandes`/`progress_callback` (pedido de
+    acompanhamento do usuário: "em vez de um limite fixo que só levanta
+    erro, me diga quantas combinações existem e uma estimativa de tempo
+    -- se eu quiser continuar mesmo assim, eu decido"):
+    `_LIMITE_COMBINACOES_OTIMIZACAO` deixa de ser um teto intransponível
+    -- com `confirmar_combinacoes_grandes=True` (padrão `False`, então
+    todo chamador existente continua vendo o `ValueError` de antes sem
+    mudar nada) a busca roda mesmo acima do limite; é responsabilidade de
+    quem chama (a UI) mostrar `n_total`/uma estimativa de tempo ANTES de
+    passar `True` -- esta função não sabe nada sobre tempo ou UI
+    (AGENTS.md §16/17, isso é apresentação). `progress_callback(
+    processadas, total)`, se informado, é chamado UMA VEZ por combinação
+    que chega ao laço caro (pós-dedupe/`max_contratos_total`, que são
+    baratos e já podados antes) -- mesma semântica de uma barra de
+    progresso tipo tqdm: quem consome cronometra o tempo entre chamadas
+    para estimar o tempo restante, esta função só entrega a contagem.
+
+    `retornar_excluidos` (pedido de acompanhamento do usuário: "por que eu
+    deveria acreditar que o filtro está eliminando as combinações
+    erradas?" -- os contadores agregados `n_puladas_*` não davam para
+    checar UMA combinação específica). Padrão `False`: formato de retorno
+    IDÊNTICO a antes deste parâmetro existir, byte a byte (mesma convenção
+    de `fronteira_pareto`'s `_agrupados` -- só aparece quando pedido). Com
+    `True`, acrescenta `"excluidos"`: uma entrada `{"alocacao": dict,
+    "motivo": str}` por combinação REJEITADA em QUALQUER camada do funil
+    (dedupe, cheap filters, ou o laço caro), nunca uma amostra parcial --
+    toda combinação de `combinacoes_brutas` termina em `resultados` OU em
+    `excluidos`, nunca as duas nem nenhuma. `motivo` é mais granular que
+    os contadores agregados para o balde `n_puladas_sobrevivencia`
+    (`min_robos_ativos`/`margem_maxima`/`max_contratos_total` viravam um
+    único contador -- "por que ESTA foi excluída" precisa da razão
+    específica; a soma das 3 bate com `n_puladas_sobrevivencia` como
+    invariante). Motivos possíveis: `composicao_duplicada`,
+    `max_contratos_total`, `min_robos_ativos`, `margem_maxima`,
+    `cluster_max_contratos`, `sem_janela_comum`, `perda_diaria_maxima`,
+    `mdd_maximo`, `risco_concentrado` (por robô OU por cluster -- mesmo
+    balde agregado `n_puladas_risco` já lumpava os dois), `limiar_maximo`.
+
+    Achado ao implementar isto (não um pedido, uma correção): o caso
+    "sem janela comum" (`_sincronizar_alocacao` retorna `largo is None` --
+    alocação degenerada ou sem período comum) nunca tinha NENHUM contador
+    -- combinações que caem nesse `continue` desapareciam silenciosamente
+    de toda contagem, não só do resultado. Corrigido com
+    `n_puladas_sem_janela_comum`, incondicional (sempre no dict de
+    retorno, não atrás de `retornar_excluidos`) -- é exatamente a classe
+    de "sumiço silencioso sem contagem" que motivou este pedido do
+    usuário, então não fazia sentido deixar de fora.
 
     Deliberadamente NÃO incluído: exposição bruta (nenhuma noção de
     "exposição" existe hoje no código -- inventar uma violaria AGENTS.md
@@ -1110,7 +1201,7 @@ def buscar_combinacoes_portfolio_com_filtros(
     `fronteira_pareto`, nenhuma duplicação nelas), `n_combinacoes_totais`,
     `n_puladas_composicao_duplicada`, `n_puladas_sobrevivencia`,
     `n_puladas_cluster`, `n_puladas_perda_diaria`, `n_puladas_risco`,
-    `n_avaliadas`.
+    `n_puladas_limiar`, `n_avaliadas`.
 
     Mesmo limite/erro de `buscar_combinacoes_portfolio` para o total
     BRUTO de combinações (`_LIMITE_COMBINACOES_OTIMIZACAO`) -- os filtros
@@ -1121,49 +1212,80 @@ def buscar_combinacoes_portfolio_com_filtros(
 
     combinacoes_brutas = list(itertools.product(*listas_candidatos))
     n_total = len(combinacoes_brutas)
-    if n_total > _LIMITE_COMBINACOES_OTIMIZACAO:
+    if n_total > _LIMITE_COMBINACOES_OTIMIZACAO and not confirmar_combinacoes_grandes:
         raise ValueError(
             f"{n_total} combinações excede o limite de {_LIMITE_COMBINACOES_OTIMIZACAO} -- "
-            "reduza o número de candidatos por robô (ou o passo entre eles)"
+            "reduza o número de candidatos por robô (ou o passo entre eles), ou chame de novo com "
+            "confirmar_combinacoes_grandes=True para rodar mesmo assim"
         )
+
+    excluidos = [] if retornar_excluidos else None
+
+    def _registrar_exclusao(alocacao_ou_combinacao, motivo):
+        if not retornar_excluidos:
+            return
+        alocacao_dict = (
+            alocacao_ou_combinacao if isinstance(alocacao_ou_combinacao, dict)
+            else dict(zip(nomes, alocacao_ou_combinacao))
+        )
+        excluidos.append({"alocacao": alocacao_dict, "motivo": motivo})
 
     sobreviventes = combinacoes_brutas
     n_puladas_dedupe = 0
-    if deduplicar_composicao:
-        menor_por_composicao = {}
-        for combinacao in combinacoes_brutas:
-            if not any(combinacao):
-                menor_por_composicao[combinacao] = combinacao  # degenerada (tudo 0), única, sem o que deduplicar
-                continue
-            g = math.gcd(*combinacao)
-            canonica = tuple(n // g for n in combinacao)
-            atual = menor_por_composicao.get(canonica)
-            if atual is None or g < math.gcd(*atual):
-                menor_por_composicao[canonica] = combinacao
-        sobreviventes = list(menor_por_composicao.values())
-        n_puladas_dedupe = n_total - len(sobreviventes)
 
     n_puladas_sobrevivencia = 0
     if max_contratos_total is not None:
         n_antes_do_total = len(sobreviventes)
-        sobreviventes = [c for c in sobreviventes if sum(c) <= max_contratos_total]
+        sobreviventes_dentro_do_total = []
+        for c in sobreviventes:
+            if sum(c) <= max_contratos_total:
+                sobreviventes_dentro_do_total.append(c)
+            else:
+                _registrar_exclusao(c, "max_contratos_total")
+        sobreviventes = sobreviventes_dentro_do_total
         n_puladas_sobrevivencia += n_antes_do_total - len(sobreviventes)
+
+    def _familia_e_escala(combinacao):
+        g = math.gcd(*combinacao)
+        return (tuple(n // g for n in combinacao) if g else combinacao), g
+
+    familias_resolvidas = set()
+    if deduplicar_composicao:
+        # maior escala primeiro (sort estável): a primeira de cada composição
+        # que passa em TODOS os filtros é a que sobrevive; as demais dessa
+        # composição são puladas sem custo. Ordem original restaurada no fim.
+        sobreviventes = sorted(sobreviventes, key=lambda c: -_familia_e_escala(c)[1])
 
     resultados = []
     n_puladas_cluster = 0
     n_puladas_perda_diaria = 0
     n_puladas_mdd = 0
     n_puladas_risco = 0
-    for combinacao in sobreviventes:
+    n_puladas_limiar = 0
+    n_puladas_sem_janela_comum = 0
+    total_sobreviventes = len(sobreviventes)
+    for indice, combinacao in enumerate(sobreviventes, start=1):
         alocacao = dict(zip(nomes, combinacao))
+
+        if progress_callback is not None:
+            progress_callback(indice, total_sobreviventes)
+
+        if deduplicar_composicao and any(combinacao):
+            familia, _ = _familia_e_escala(combinacao)
+            if familia in familias_resolvidas:
+                n_puladas_dedupe += 1
+                _registrar_exclusao(alocacao, "composicao_duplicada")
+                continue
 
         n_ativos = sum(1 for n in combinacao if n > 0)
         if n_ativos < min_robos_ativos:
             n_puladas_sobrevivencia += 1
+            _registrar_exclusao(alocacao, "min_robos_ativos")
             continue
         margem_total = sum(margens_por_contrato[nome] * n for nome, n in alocacao.items())
         if margem_maxima is not None and margem_total > margem_maxima:
             n_puladas_sobrevivencia += 1
+            _registrar_exclusao(alocacao, "margem_maxima")
             continue
         if clusters is not None and max_contratos_por_cluster is not None:
             excede_cluster = any(
@@ -1172,18 +1294,22 @@ def buscar_combinacoes_portfolio_com_filtros(
             )
             if excede_cluster:
                 n_puladas_cluster += 1
+                _registrar_exclusao(alocacao, "cluster_max_contratos")
                 continue
 
         largo, margens_ativas = _sincronizar_alocacao(
             alocacao, diarios_referencia, margens_por_contrato, usar_janela_comum,
         )
         if largo is None:
+            n_puladas_sem_janela_comum += 1
+            _registrar_exclusao(alocacao, "sem_janela_comum")
             continue
 
         if perda_diaria_maxima is not None:
             combinada = serie_combinada(largo)
             if combinada.min() < perda_diaria_maxima:
                 n_puladas_perda_diaria += 1
+                _registrar_exclusao(alocacao, "perda_diaria_maxima")
                 continue
 
         if mdd_maximo is not None:
@@ -1191,6 +1317,7 @@ def buscar_combinacoes_portfolio_com_filtros(
             mdd_combinacao = maximo_drawdown(drawdown(curva_equity(combinada)))
             if mdd_combinacao < mdd_maximo:
                 n_puladas_mdd += 1
+                _registrar_exclusao(alocacao, "mdd_maximo")
                 continue
 
         if limite_risco_por_robo_pct is not None or limite_risco_por_cluster_pct is not None:
@@ -1210,13 +1337,25 @@ def buscar_combinacoes_portfolio_com_filtros(
                 )
                 if excede_por_robo or excede_por_cluster:
                     n_puladas_risco += 1
+                    _registrar_exclusao(alocacao, "risco_concentrado")
                     continue
 
-        resultados.append(_metricas_de_alocacao(
+        resultado = _metricas_de_alocacao(
             alocacao, largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
-        ))
+        )
+        if limiar_maximo is not None and resultado["limiar_ativo"] > limiar_maximo:
+            n_puladas_limiar += 1
+            _registrar_exclusao(alocacao, "limiar_maximo")
+            continue
+        resultados.append(resultado)
+        if deduplicar_composicao and any(combinacao):
+            familias_resolvidas.add(_familia_e_escala(combinacao)[0])
 
-    return {
+    if deduplicar_composicao:
+        posicao = {c: i for i, c in enumerate(combinacoes_brutas)}
+        resultados.sort(key=lambda r: posicao[tuple(r["alocacao"][n] for n in nomes)])
+
+    saida = {
         "resultados": resultados,
         "n_combinacoes_totais": n_total,
         "n_puladas_composicao_duplicada": n_puladas_dedupe,
@@ -1225,8 +1364,13 @@ def buscar_combinacoes_portfolio_com_filtros(
         "n_puladas_perda_diaria": n_puladas_perda_diaria,
         "n_puladas_mdd": n_puladas_mdd,
         "n_puladas_risco": n_puladas_risco,
+        "n_puladas_limiar": n_puladas_limiar,
+        "n_puladas_sem_janela_comum": n_puladas_sem_janela_comum,
         "n_avaliadas": len(resultados),
     }
+    if retornar_excluidos:
+        saida["excluidos"] = excluidos
+    return saida
 
 
 def selecionar_melhores_combinacoes(
@@ -1487,6 +1631,10 @@ def funil_selecao_portfolio(
     limite_risco_por_robo_pct: float = None,
     limite_risco_por_cluster_pct: float = None,
     mdd_maximo: float = None,
+    limiar_maximo: float = None,
+    confirmar_combinacoes_grandes: bool = False,
+    progress_callback: callable = None,
+    retornar_excluidos: bool = False,
     top_n_eficiencia: int = 20,
     tolerancia_robustez_pct: float = 20.0,
     incluir_transferencias_robustez: bool = True,
@@ -1504,10 +1652,31 @@ def funil_selecao_portfolio(
        (dedupe/min_robos_ativos/margem_maxima/perda_diaria_maxima/
        clusters/max_contratos_por_cluster/max_contratos_total/
        limite_risco_por_robo_pct/limite_risco_por_cluster_pct/
-       mdd_maximo) são repassados diretamente, nenhuma lógica nova aqui.
+       mdd_maximo/limiar_maximo/confirmar_combinacoes_grandes/
+       progress_callback/retornar_excluidos) são repassados diretamente,
+       nenhuma lógica nova aqui -- a camada 1 é onde mora o laço caro sobre TODAS as
+       combinações brutas, então é ali que o progresso/confirmação
+       importam; camadas 2-4 operam sobre listas já pequenas
+       (`top_n_eficiencia` + sobras da fronteira, tipicamente dezenas).
     2. **Eficiência**: ranqueia os sobreviventes por `_eficiencia_rlt_mdd`
        (RLT/|MDD|, computável dos campos que a camada 1 já calcula --
-       nenhuma fórmula nova) e mantém os `top_n_eficiencia` melhores.
+       nenhuma fórmula nova) e mantém os `top_n_eficiencia` melhores --
+       MAIS qualquer sobrevivente que esteja na fronteira de Pareto
+       estrita (`fronteira_pareto(..., "rlt_acumulado", "mdd")`, mesmos
+       eixos usados depois por `shortlist_portfolio`) e teria sido
+       cortado pelo top-N. Correção de transparência (pedido de
+       acompanhamento do usuário): truncar por UMA razão (RLT/|MDD|)
+       antes de olhar a fronteira podia descartar em silêncio uma
+       carteira Pareto-ótima por outro eixo (ex. maior RLT bruto, MDD
+       maior) só por ter ficado fora do top-N -- o usuário nunca saberia
+       que ela existiu. `top_n_eficiencia` continua controlando o "piso"
+       da lista; quando a fronteira é maior que ele, a lista CRESCE para
+       acomodar as sobras da fronteira em vez de descartá-las -- nunca o
+       contrário. Cada entrada carrega `preservado_pela_fronteira` (bool):
+       `True` só para quem entrou por estar na fronteira e ficaria de
+       fora do top-N puro -- permite a UI distinguir "melhor por
+       eficiência" de "Pareto-ótima mas cara/arriscada demais para
+       ranquear alto nessa razão única".
     3. **Robustez**: roda `vizinhanca_local` (já existente) em cada um
        dos `top_n_eficiencia` e elimina quem tem a MÉDIA do
        `rlt_acumulado` das vizinhas abaixo de
@@ -1547,12 +1716,31 @@ def funil_selecao_portfolio(
         limite_risco_por_robo_pct=limite_risco_por_robo_pct,
         limite_risco_por_cluster_pct=limite_risco_por_cluster_pct,
         mdd_maximo=mdd_maximo,
+        limiar_maximo=limiar_maximo,
+        confirmar_combinacoes_grandes=confirmar_combinacoes_grandes,
+        progress_callback=progress_callback,
+        retornar_excluidos=retornar_excluidos,
     )
 
+    com_eficiencia = [
+        dict(r, eficiencia_rlt_mdd=_eficiencia_rlt_mdd(r["rlt_acumulado"], r["mdd"]))
+        for r in camada1["resultados"]
+    ]
+    ordenados_por_eficiencia = sorted(com_eficiencia, key=lambda r: r["eficiencia_rlt_mdd"], reverse=True)
+    top_eficiencia = ordenados_por_eficiencia[:top_n_eficiencia]
+
+    def _chave_alocacao(alocacao: dict) -> tuple:
+        return tuple(sorted(alocacao.items()))
+
+    chaves_top = {_chave_alocacao(r["alocacao"]) for r in top_eficiencia}
+    fronteira_camada2 = fronteira_pareto(com_eficiencia, "rlt_acumulado", "mdd")
+    extras_fronteira = [r for r in fronteira_camada2 if _chave_alocacao(r["alocacao"]) not in chaves_top]
+
     camada2 = sorted(
-        (dict(r, eficiencia_rlt_mdd=_eficiencia_rlt_mdd(r["rlt_acumulado"], r["mdd"])) for r in camada1["resultados"]),
+        [dict(r, preservado_pela_fronteira=False) for r in top_eficiencia]
+        + [dict(r, preservado_pela_fronteira=True) for r in extras_fronteira],
         key=lambda r: r["eficiencia_rlt_mdd"], reverse=True,
-    )[:top_n_eficiencia]
+    )
 
     avaliados_camada3 = []
     for r in camada2:
@@ -1720,6 +1908,7 @@ def shortlist_portfolio(
     eixo_risco: str = "mdd",
     retorno_minimo: float = None,
     risco_maximo: float = None,
+    capital_alvo: float = None,
     percentil_cauda: int = 95,
     fracao_reserva_operacional: float = 0.0,
     increment: float = None,
@@ -1736,6 +1925,15 @@ def shortlist_portfolio(
     - `"growth"`: maior `eixo_retorno` entre as combinações cujo
       `eixo_risco` é `>= risco_maximo` (sem filtro se `risco_maximo` for
       `None`).
+    - `"capital_alvo"` (só se `capital_alvo` for informado -- pedido de
+      acompanhamento do usuário: "melhor portfólio com capital próximo
+      de X"): maior `eixo_retorno` entre as combinações cujo
+      `limiar_ativo` é `<= capital_alvo` (TETO RÍGIDO, X confirmado como
+      o limiar já calculado, não a margem bruta). Mesmo idioma de
+      `"growth"`, só trocando o eixo de risco pelo limiar -- NÃO força
+      usar todo o `capital_alvo`: se uma combinação mais barata tem
+      retorno maior, ela vence (nenhum viés de "gastar tudo" embutido em
+      "melhor").
     - `"balanced"`: o ponto de `fronteira_pareto(resultados, eixo_retorno,
       eixo_risco)` mais próximo do canto ideal (máximo retorno E máximo
       risco, ambos normalizados para `[0, 1]`) -- técnica padrão de
@@ -1767,7 +1965,14 @@ def shortlist_portfolio(
     Cada valor do dicionário é `None` quando nenhuma combinação satisfaz
     o filtro do perfil (`minimum_risk`/`growth`) ou quando a fronteira
     está vazia (`balanced`) -- `resultados` vazio propaga `None` para
-    todos os perfis baseados nele, nunca inventa um substituto."""
+    todos os perfis baseados nele, nunca inventa um substituto.
+
+    Todo perfil não-`None` (incluindo os 3 benchmarks e `carteira_atual`)
+    carrega `tuw_max`/`sharpe`/`sortino`/`calmar` (pedido de
+    acompanhamento do usuário -- ver `_metricas_de_alocacao`,
+    `incluir_metricas_estendidas`), calculados sobre `serie_combinada`
+    daquela alocação específica, reusando `metrics.sharpe`/`sortino`/
+    `calmar` sem nenhuma fórmula nova."""
     nomes = list(diarios_referencia.keys())
 
     def _avaliar(alocacao: dict) -> dict:
@@ -1778,19 +1983,32 @@ def shortlist_portfolio(
             return None
         return _metricas_de_alocacao(
             alocacao, largo, margens_ativas, percentil_cauda, fracao_reserva_operacional, increment,
+            incluir_metricas_estendidas=True,
         )
 
     shortlist = {}
 
+    # minimum_risk/growth/balanced escolhem um dict já existente de
+    # `resultados` (que pode vir de `buscar_combinacoes_portfolio` OU do
+    # funil, nenhum dos dois calcula métricas estendidas por padrão --
+    # caro demais para RODAR EM TODA combinação avaliada). Re-derivar via
+    # `_avaliar(...)` aqui é barato (só a MEIA-DÚZIA de nomes que a
+    # shortlist retorna, não a busca inteira) e determinístico -- mesma
+    # alocação/diarios/parâmetros, mesmo resultado, só com Sharpe/
+    # Sortino/Calmar/TUW a mais.
     validos_minimum_risk = [
         r for r in resultados if retorno_minimo is None or r[eixo_retorno] >= retorno_minimo
     ]
     shortlist["minimum_risk"] = (
-        max(validos_minimum_risk, key=lambda r: r[eixo_risco]) if validos_minimum_risk else None
+        _avaliar(max(validos_minimum_risk, key=lambda r: r[eixo_risco])["alocacao"])
+        if validos_minimum_risk else None
     )
 
     validos_growth = [r for r in resultados if risco_maximo is None or r[eixo_risco] >= risco_maximo]
-    shortlist["growth"] = max(validos_growth, key=lambda r: r[eixo_retorno]) if validos_growth else None
+    shortlist["growth"] = (
+        _avaliar(max(validos_growth, key=lambda r: r[eixo_retorno])["alocacao"])
+        if validos_growth else None
+    )
 
     fronteira = fronteira_pareto(resultados, eixo_retorno, eixo_risco)
     if fronteira:
@@ -1804,9 +2022,16 @@ def shortlist_portfolio(
             nk = (r[eixo_risco] - min_k) / (max_k - min_k) if max_k > min_k else 1.0
             return (1 - nr) ** 2 + (1 - nk) ** 2
 
-        shortlist["balanced"] = min(fronteira, key=_dist_ao_ideal)
+        shortlist["balanced"] = _avaliar(min(fronteira, key=_dist_ao_ideal)["alocacao"])
     else:
         shortlist["balanced"] = None
+
+    if capital_alvo is not None:
+        validos_capital_alvo = [r for r in resultados if r["limiar_ativo"] <= capital_alvo]
+        shortlist["capital_alvo"] = (
+            _avaliar(max(validos_capital_alvo, key=lambda r: r[eixo_retorno])["alocacao"])
+            if validos_capital_alvo else None
+        )
 
     largo_ref = sincronizar_portfolio(diarios_referencia)
     if usar_janela_comum:
