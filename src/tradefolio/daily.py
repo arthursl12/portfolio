@@ -11,6 +11,8 @@ cancelled order in n_trades would be factually wrong (nothing executed),
 even though its Quantidade executada == 0 already keeps it from moving
 bruto/custo.
 """
+import math
+
 import pandas as pd
 import pandas_market_calendars as mcal
 
@@ -163,6 +165,63 @@ def detectar_contratos_referencia_multi_ativo(ordens: pd.DataFrame, dias_recente
     WIN + 2 WDO = 5), não uma perna isolada. Para um robô de ativo
     único, dá exatamente o mesmo resultado de `detectar_contratos_referencia`."""
     return sum(contratos_referencia_por_ativo(ordens, dias_recentes).values())
+
+
+def detectar_contratos_referencia_piramide(ordens: pd.DataFrame) -> int:
+    """Detecta 'contratos_referencia' para um robô que PIRAMIDA: reforça
+    a mesma posição em múltiplas pernas de 'entrada' (ex. 1 -> 1 -> 2
+    contratos) enquanto o preço segue contra, até reverter e fechar tudo
+    numa única 'saída' grande -- padrão confirmado no robô "Flecha"
+    (entra contra a tendência, reforça na média, sai grande na reversão).
+
+    `detectar_contratos_referencia` (quantidade dominante) e
+    `detectar_contratos_referencia_multi_ativo` (janela por ativo) falham
+    nesse padrão -- não existe UMA quantidade de ordem dominante, porque
+    a 'saída' soma pernas de tamanhos variados em vez de repetir um valor
+    fixo. Isso é esperado daquelas funções, não um bug: `orders_roboraiz.csv`
+    tem o mesmo sintoma (nenhuma quantidade dominante) por um motivo
+    totalmente diferente -- tamanho de posição genuinamente dinâmico, sem
+    reforço em múltiplas pernas -- e deve continuar exigindo intervenção
+    humana em vez de ser resolvido por aqui.
+
+    Convenção adotada nesta sessão para o robô Flecha (decisão do
+    usuário, não inventada -- AGENTS.md §24): 'contratos_referencia' é o
+    MDC (GCD) das quantidades de TODAS as pernas de 'entrada' executadas
+    -- a menor unidade de reforço recorrente (ex. reforços de 1, 2 e 4
+    contratos -> MDC = 1, "1 contrato por reforço"). Só é aplicada quando
+    há evidência ESTRUTURAL real de piramidação (>= 1 trade reconstruído,
+    por posição líquida saindo e voltando a zero, com mais de uma perna
+    de 'entrada'); sem essa evidência, levanta erro em vez de tratar
+    qualquer distribuição de quantidade sem valor dominante como
+    piramidação.
+    """
+    executadas = ordens[ordens["Status"] == STATUS_EXECUTADA].sort_values("dt")
+
+    posicao = 0
+    n_entrada_no_trade = 0
+    entrada_qtds = []
+    trade_tem_piramide = False
+
+    for _, ordem in executadas.iterrows():
+        qtd = ordem["Quantidade executada"]
+        sinal = 1 if ordem["C/V"] == "C" else -1
+        if posicao == 0:
+            n_entrada_no_trade = 0
+        posicao += sinal * qtd
+        if ordem["Tipo"] == "entrada":
+            entrada_qtds.append(int(qtd))
+            n_entrada_no_trade += 1
+        if posicao == 0 and n_entrada_no_trade > 1:
+            trade_tem_piramide = True
+
+    if not trade_tem_piramide:
+        raise ValueError(
+            "nenhum trade reconstruído mostra mais de uma perna de 'entrada' -- "
+            "sem evidência estrutural de piramidação, não é seguro assumir que a "
+            "ausência de quantidade de ordem dominante vem desse padrão"
+        )
+
+    return math.gcd(*entrada_qtds)
 
 
 def escalar_por_contratos(valores, n_contratos: float):
