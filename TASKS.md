@@ -287,6 +287,20 @@ aditiva sobre o pipeline funcional existente — `daily.py`/`metrics.py`/
 - [x] "Expectativa por operação" — `expectancia_por_trade` em
   `calcular_pagina2` (`metrics.expectancia(trades["resultado_liquido"])`),
   com entrada no `metric_registry` — totalmente ligado, não só a função
+- [x] **Correção: Profit Factor/win rate/sequências (Página 2) estavam
+  errados para robôs multi-ativo** — `trades.reconstruir_trades` tracked
+  ONE net-position counter across the whole `ordens` argument, sem separar
+  por instrumento. Dois instrumentos podem ambos estar "abertos" ao mesmo
+  tempo sem que um feche o trade do outro; a posição combinada só zera
+  quando ambos zeram juntos, fundindo trades reais em menos trades,
+  maiores. Não pego por nenhum teste existente (todos os fixtures de
+  `reconstruir_trades` eram de um único ativo). Achado ao apurar um post
+  técnico sobre este módulo, verificado contra `orders_roboraiz.csv`
+  (WIN+WDO real): 900 trades combinados vs. 1.592 reconstruindo por
+  instrumento (`validation.extrair_raiz_ativo`, mesmo agrupamento que
+  `daily.agregar_diario_por_ativo` já usa). Corrigido: `reconstruir_trades`
+  agora agrupa por raiz do ativo antes de reconstruir, depois concatena e
+  reordena por `inicio` — `tests/test_trades_multi_ativo.py`
 
 ---
 
