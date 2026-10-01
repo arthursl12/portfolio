@@ -7,6 +7,7 @@ comportam como componentes de um portfólio discreto (contratos inteiros)
 
 [![CI](https://github.com/arthursl12/portfolio/actions/workflows/ci.yml/badge.svg)](https://github.com/arthursl12/portfolio/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/arthursl12/portfolio/branch/main/graph/badge.svg)](https://codecov.io/gh/arthursl12/portfolio)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://easportfolio.streamlit.app/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 · [🇺🇸 English](README.md)
 
