@@ -5,6 +5,8 @@ measuring their risk and performance, and evaluating how they behave as
 components of a discrete, integer-contract portfolio — not just ranked
 individually.
 
+[![CI](https://github.com/arthursl12/portfolio/actions/workflows/ci.yml/badge.svg)](https://github.com/arthursl12/portfolio/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/arthursl12/portfolio/branch/main/graph/badge.svg)](https://codecov.io/gh/arthursl12/portfolio)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 · [🇧🇷 Português](README.pt-BR.md)
 
@@ -79,7 +81,6 @@ This platform exists to answer questions like:
 - Generic (non-Smarttbot) CSV import formats
 - Persisting analyses across sessions
 - Broker integration or automated order execution
-- Continuous integration pipeline
 
 ## Application modules
 
@@ -201,13 +202,13 @@ git clone <repository-url>
 cd Portfolio
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pip install -e .
 ```
 
-(`requirements-dev.txt` includes `requirements.txt` — pandas, numpy,
-matplotlib, pandas_market_calendars — plus pytest. `pip install -e .`
-makes the `tradefolio` package in `src/` importable from anywhere in the
-project; without it, `import tradefolio` only works inside pytest.)
+(`requirements-dev.txt` chains in `requirements.txt` — pandas, numpy,
+matplotlib, pandas_market_calendars, plus an editable install of the
+`tradefolio` package itself (`-e .`) — and adds pytest/pytest-cov. The
+editable install is what makes `tradefolio` importable from anywhere in
+the project, not just inside pytest.)
 
 ### Generate a report for one strategy
 
@@ -253,8 +254,9 @@ calculations, Monte Carlo robustness, multi-strategy portfolio
 synchronization and discrete allocation, and regression cases for real
 bugs found during development.
 
-There's no CI pipeline yet — tests are run locally before each change,
-not automatically on push (see [Roadmap](#roadmap)).
+Every push and pull request to `main` runs the full suite in CI
+(`.github/workflows/ci.yml`), with coverage uploaded to
+[Codecov](https://codecov.io/gh/arthursl12/portfolio).
 
 ## Selected engineering decisions
 
@@ -287,7 +289,6 @@ for drawdown and Ulcer Index, so the daily series keeps an explicit
   yet.
 - Analyses aren't persisted — every session (CLI or Streamlit) starts
   from the source CSVs.
-- No CI pipeline — tests run locally, not automatically on each push.
 - Portfolio sync can't yet distinguish "robot didn't exist yet" from
   "robot's data is missing" — both currently show up as `NaN`.
 - 6 of 7 named capital-withdrawal policies aren't implemented (no literal
@@ -299,7 +300,6 @@ for drawdown and Ulcer Index, so the daily series keeps an explicit
 
 ## Roadmap
 
-- [ ] Add CI (automated tests on every push/PR)
 - [ ] Implement the remaining capital-withdrawal policies once their
       formulas are decided
 - [ ] Add an explicit missing-data signal at the portfolio level

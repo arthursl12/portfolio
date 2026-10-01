@@ -5,6 +5,8 @@ sistemático, medir seu risco e performance, e avaliar como eles se
 comportam como componentes de um portfólio discreto (contratos inteiros)
 — não apenas ranqueados individualmente.
 
+[![CI](https://github.com/arthursl12/portfolio/actions/workflows/ci.yml/badge.svg)](https://github.com/arthursl12/portfolio/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/arthursl12/portfolio/branch/main/graph/badge.svg)](https://codecov.io/gh/arthursl12/portfolio)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 · [🇺🇸 English](README.md)
 
@@ -85,7 +87,6 @@ Esta plataforma existe para responder perguntas como:
 - Formatos de importação genéricos (fora do padrão Smarttbot)
 - Persistência de análises entre sessões
 - Integração com corretora ou execução automática de ordens
-- Pipeline de integração contínua (CI)
 
 ## Módulos da aplicação
 
@@ -212,13 +213,13 @@ git clone <repository-url>
 cd Portfolio
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
-.venv/bin/pip install -e .
 ```
 
-(`requirements-dev.txt` inclui `requirements.txt` — pandas, numpy,
-matplotlib, pandas_market_calendars — mais pytest. O `pip install -e .`
-deixa o pacote `tradefolio` em `src/` importável de qualquer lugar do
-projeto — sem ele, `import tradefolio` só funciona dentro do pytest.)
+(`requirements-dev.txt` encadeia `requirements.txt` — pandas, numpy,
+matplotlib, pandas_market_calendars, mais uma instalação editável do
+próprio pacote `tradefolio` (`-e .`) — e adiciona pytest/pytest-cov. É a
+instalação editável que deixa `tradefolio` importável de qualquer lugar
+do projeto, não só dentro do pytest.)
 
 ### Gerando um relatório para uma estratégia
 
@@ -265,8 +266,9 @@ Monte Carlo, sincronização multi-estratégia de portfólio e alocação
 discreta, e casos de regressão para bugs reais encontrados durante o
 desenvolvimento.
 
-Ainda não há pipeline de CI — os testes rodam localmente antes de cada
-mudança, não automaticamente a cada push (ver [Roadmap](#roadmap)).
+Todo push e pull request para `main` roda a suíte completa em CI
+(`.github/workflows/ci.yml`), com a cobertura enviada ao
+[Codecov](https://codecov.io/gh/arthursl12/portfolio).
 
 ## Decisões técnicas selecionadas
 
@@ -301,8 +303,6 @@ zero.
   um importador genérico.
 - As análises não são persistidas — cada sessão (CLI ou Streamlit) parte
   dos CSVs de origem.
-- Não há pipeline de CI — os testes rodam localmente, não
-  automaticamente a cada push.
 - A sincronização de portfólio ainda não distingue "robô ainda não
   existia" de "dado do robô está ausente" — ambos aparecem hoje como
   `NaN`.
@@ -315,7 +315,6 @@ zero.
 
 ## Roadmap
 
-- [ ] Adicionar CI (testes automatizados em cada push/PR)
 - [ ] Implementar as políticas de retirada restantes assim que suas
       fórmulas forem decididas
 - [ ] Adicionar um sinal explícito de dado ausente no nível de portfólio
