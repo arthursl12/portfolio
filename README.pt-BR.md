@@ -97,7 +97,7 @@ drawdown, sequências de trades e métricas de risco de cauda, renderizado
 como um relatório HTML autocontido ou como o primeiro modo do app ao
 vivo.
 
-*(Screenshot em breve.)*
+![Relatório de robô único: curva de capital, drawdown e métricas resumo](docs/demo/screen_lamina.png)
 
 ### Portfólio (Lab)
 
@@ -105,7 +105,7 @@ Sincroniza duas ou mais estratégias e mostra como elas se comportam
 combinadas: correlação, clusters de risco e a contribuição marginal de
 cada estratégia ao drawdown do portfólio.
 
-*(Screenshot em breve.)*
+![Portfólio (Lab): composição multi-estratégia, correlação e clusters de risco](docs/demo/screen_lab.png)
 
 ### Portfolio Builder
 
@@ -115,7 +115,7 @@ limites de concentração, uma fronteira de Pareto discreta sobre
 combinações de contratos inteiros, e uma comparação final das carteiras
 candidatas sob cenários históricos e de Monte Carlo.
 
-*(Screenshot em breve.)*
+![Portfolio Builder: passo 5, comparando três carteiras candidatas](docs/demo/screen_builder.png)
 
 ## Destaques de engenharia
 

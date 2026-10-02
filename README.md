@@ -90,7 +90,7 @@ Analyze one robot's order history in isolation: equity curve, drawdown,
 trade sequences, and tail-risk metrics, rendered as a self-contained HTML
 report or the first mode of the live app.
 
-*(Screenshot coming soon.)*
+![Single-strategy report: equity curve, drawdown, and summary metrics](docs/demo/screen_lamina.png)
 
 ### Portfolio Lab
 
@@ -98,7 +98,7 @@ Synchronize two or more strategies and see what they look like combined:
 correlation, risk clustering, and each strategy's marginal contribution
 to portfolio-level drawdown.
 
-*(Screenshot coming soon.)*
+![Portfolio Lab: multi-strategy composition, correlation, and risk clustering](docs/demo/screen_lab.png)
 
 ### Portfolio Builder
 
@@ -108,7 +108,7 @@ discrete Pareto frontier over integer-contract combinations, and a final
 comparison of candidate portfolios under historical and Monte Carlo
 scenarios.
 
-*(Screenshot coming soon.)*
+![Portfolio Builder: step 5, comparing three candidate portfolios](docs/demo/screen_builder.png)
 
 ## Engineering highlights
 
