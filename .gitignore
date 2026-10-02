@@ -16,3 +16,6 @@ orders_*.html
 posts/
 prompts/
 scripts/
+
+# Raw screen-recording sources -- only the converted GIF (docs/demo/*.gif) is published
+docs/demo/source/

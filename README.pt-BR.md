@@ -18,8 +18,7 @@ comportam como componentes de um portfólio discreto (contratos inteiros)
 > portfólio, não apenas pela performance isolada. Não é um serviço de
 > sinais de trading — não executa ordens nem dá recomendação financeira.
 
-*(GIF principal de demonstração em breve — veja [Módulos da aplicação](#módulos-da-aplicação)
-abaixo para entender cada parte, ou abra direto a [demo ao vivo](https://easportfolio.streamlit.app/).)*
+![Fluxo da aplicação: Strategy Lab, Portfolio Builder e a lâmina técnica](docs/demo/application-workflow.gif)
 
 ## Problema
 

@@ -18,8 +18,7 @@ individually.
 > standalone performance. Not a trading-signal service — it does not
 > execute orders or give financial advice.
 
-*(Main walkthrough GIF coming soon — see [Application modules](#application-modules)
-below for what each part does, or just open the [live demo](https://easportfolio.streamlit.app/).)*
+![Application walkthrough: Strategy Lab, Portfolio Builder, and the technical sheet](docs/demo/application-workflow.gif)
 
 ## Problem
 
